@@ -6,8 +6,16 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const crypto = require('crypto');
+const axios = require('axios');
+const { Client: QStashClient } = require('@upstash/qstash');
 const WordPressAnalyzer = require('./src/wordpress-analyzer');
 const EmailService = require('./src/services/email-service');
+
+// Initialize QStash client (for async job processing)
+const qstash = process.env.QSTASH_TOKEN
+    ? new QStashClient({ token: process.env.QSTASH_TOKEN })
+    : null;
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -159,6 +167,275 @@ app.post('/api/analyze/pdf', async (req, res) => {
         });
     }
 });
+
+// ============================================================================
+// WEBHOOK-BASED ASYNC REPORT ENDPOINT (for WordPress integration)
+// ============================================================================
+
+/**
+ * POST /api/analyze/report
+ *
+ * Queues a report generation job and returns immediately.
+ * Results are sent to the provided webhook_url when complete.
+ *
+ * Request body:
+ *   - url: Website URL to analyze (required)
+ *   - webhook_url: URL to receive results (required)
+ *   - format: PDF format - 'standard', 'print', 'landscape' (optional, default: 'standard')
+ *
+ * Response (immediate):
+ *   - success: true
+ *   - job_id: Unique job identifier
+ *   - status: 'queued'
+ *
+ * Webhook callback payload:
+ *   - success: true/false
+ *   - job_id: Same job identifier
+ *   - pdf_base64: Base64 encoded PDF (on success)
+ *   - filename: Suggested filename
+ *   - summary: Analysis summary
+ *   - error: Error message (on failure)
+ */
+app.post('/api/analyze/report', async (req, res) => {
+    try {
+        const { url, webhook_url, format } = req.body;
+
+        // Validate required parameters
+        if (!url) {
+            return res.status(400).json({
+                success: false,
+                error: 'URL is required'
+            });
+        }
+
+        if (!webhook_url) {
+            return res.status(400).json({
+                success: false,
+                error: 'webhook_url is required'
+            });
+        }
+
+        // Validate webhook URL format
+        try {
+            new URL(webhook_url);
+        } catch {
+            return res.status(400).json({
+                success: false,
+                error: 'Invalid webhook_url format'
+            });
+        }
+
+        // Generate unique job ID
+        const jobId = crypto.randomUUID();
+
+        console.log(`📋 Job ${jobId}: Queuing report generation for ${url}`);
+        console.log(`📋 Job ${jobId}: Webhook URL: ${webhook_url}`);
+
+        // Check if QStash is configured
+        if (!qstash) {
+            console.error('❌ QStash not configured. Set QSTASH_TOKEN environment variable.');
+            return res.status(503).json({
+                success: false,
+                error: 'Async processing not configured. Please set up QStash.',
+                setup_url: 'https://upstash.com/docs/qstash'
+            });
+        }
+
+        // Get the base URL for the processing endpoint
+        const baseUrl = process.env.VERCEL_URL
+            ? `https://${process.env.VERCEL_URL}`
+            : process.env.APP_URL || `http://localhost:${PORT}`;
+
+        // Queue the job via QStash
+        const qstashResponse = await qstash.publishJSON({
+            url: `${baseUrl}/api/internal/process-report`,
+            body: {
+                job_id: jobId,
+                url: url,
+                webhook_url: webhook_url,
+                format: format || 'standard',
+                queued_at: new Date().toISOString()
+            },
+            retries: 2 // Retry up to 2 times on failure
+        });
+
+        console.log(`✅ Job ${jobId}: Queued successfully (QStash ID: ${qstashResponse.messageId})`);
+
+        // Return immediately with job ID
+        res.json({
+            success: true,
+            job_id: jobId,
+            status: 'queued',
+            message: 'Report generation started. Results will be sent to webhook_url when complete.',
+            qstash_message_id: qstashResponse.messageId
+        });
+
+    } catch (error) {
+        console.error('❌ Failed to queue report job:', error.message);
+        res.status(500).json({
+            success: false,
+            error: `Failed to queue job: ${error.message}`
+        });
+    }
+});
+
+/**
+ * POST /api/internal/process-report
+ *
+ * Internal endpoint called by QStash to process report generation.
+ * This endpoint does the actual work and calls the webhook when done.
+ *
+ * IMPORTANT: This endpoint completes ALL work before sending response.
+ * QStash will retry if it doesn't get a 2xx response within its timeout.
+ *
+ * This endpoint should NOT be called directly - it's triggered by QStash.
+ */
+app.post('/api/internal/process-report', async (req, res) => {
+    const startTime = Date.now();
+    const { job_id, url, webhook_url, format, queued_at } = req.body;
+
+    console.log(`🔄 Job ${job_id}: Starting processing for ${url}`);
+    console.log(`🔄 Job ${job_id}: Queued at ${queued_at}, started at ${new Date().toISOString()}`);
+
+    try {
+        // Step 1: Analyze the website
+        console.log(`📊 Job ${job_id}: Step 1/3 - Analyzing website...`);
+        const analysisStartTime = Date.now();
+        const results = await analyzer.analyzeSite(url);
+        const analysisTime = Date.now() - analysisStartTime;
+        console.log(`✅ Job ${job_id}: Analysis completed in ${(analysisTime / 1000).toFixed(1)}s`);
+
+        // Step 2: Generate PDF
+        console.log(`📄 Job ${job_id}: Step 2/3 - Generating PDF...`);
+        const pdfStartTime = Date.now();
+
+        let pdfBuffer;
+        const pdfOptions = {};
+
+        switch (format) {
+            case 'print':
+                pdfBuffer = await analyzer.generatePrintOptimizedPdfReport(results, pdfOptions);
+                break;
+            case 'landscape':
+                pdfBuffer = await analyzer.generateLandscapePdfReport(results, pdfOptions);
+                break;
+            default:
+                pdfBuffer = await analyzer.generatePdfReport(results, pdfOptions);
+        }
+
+        const pdfTime = Date.now() - pdfStartTime;
+        console.log(`✅ Job ${job_id}: PDF generated in ${(pdfTime / 1000).toFixed(1)}s, size: ${pdfBuffer.length} bytes`);
+
+        // Step 3: Send results to webhook
+        console.log(`📤 Job ${job_id}: Step 3/3 - Sending results to webhook...`);
+
+        const domain = new URL(url).hostname;
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        const filename = `wordpress-analysis-${domain}-${timestamp}.pdf`;
+
+        const totalTime = Date.now() - startTime;
+
+        // Prepare webhook payload
+        const webhookPayload = {
+            success: true,
+            job_id: job_id,
+            data: {
+                url: url,
+                filename: filename,
+                pdf_base64: pdfBuffer.toString('base64'),
+                pdf_size: pdfBuffer.length,
+                mime_type: 'application/pdf',
+                generated_at: new Date().toISOString(),
+                processing_time: {
+                    analysis_ms: analysisTime,
+                    pdf_ms: pdfTime,
+                    total_ms: totalTime
+                },
+                summary: {
+                    is_wordpress: results.wordpress?.isWordPress || false,
+                    wp_version: results.version?.version || null,
+                    theme: results.theme?.displayName || results.theme?.name || null,
+                    plugin_count: results.plugins?.length || 0,
+                    outdated_plugins: results.plugins?.filter(p => p.isOutdated === true).length || 0,
+                    performance_score: {
+                        mobile: results.performance?.pagespeed?.mobile?.performance_score || null,
+                        desktop: results.performance?.pagespeed?.desktop?.performance_score || null
+                    }
+                }
+            }
+        };
+
+        // Send to webhook
+        await axios.post(webhook_url, webhookPayload, {
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Job-ID': job_id,
+                'X-Source': 'wordpress-analyzer'
+            },
+            timeout: 30000 // 30 second timeout for webhook
+        });
+
+        console.log(`✅ Job ${job_id}: Completed successfully in ${(totalTime / 1000).toFixed(1)}s`);
+
+        // Send success response to QStash AFTER all work is done
+        res.json({
+            success: true,
+            job_id: job_id,
+            processing_time_ms: totalTime,
+            webhook_delivered: true
+        });
+
+    } catch (error) {
+        console.error(`❌ Job ${job_id}: Failed - ${error.message}`);
+
+        // Send error to webhook
+        try {
+            await axios.post(webhook_url, {
+                success: false,
+                job_id: job_id,
+                error: error.message,
+                failed_at: new Date().toISOString()
+            }, {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Job-ID': job_id,
+                    'X-Source': 'wordpress-analyzer'
+                },
+                timeout: 10000
+            });
+            console.log(`📤 Job ${job_id}: Error notification sent to webhook`);
+        } catch (webhookError) {
+            console.error(`❌ Job ${job_id}: Failed to send error to webhook: ${webhookError.message}`);
+        }
+
+        // Return error to QStash - it may retry based on configuration
+        res.status(500).json({
+            success: false,
+            job_id: job_id,
+            error: error.message
+        });
+    }
+});
+
+/**
+ * GET /api/report/status/:jobId
+ *
+ * Check the status of a queued job (optional endpoint for debugging)
+ * Note: With webhook pattern, this is not strictly necessary
+ */
+app.get('/api/report/status/:jobId', (req, res) => {
+    // For webhook pattern, job status is communicated via webhook
+    // This endpoint is mainly for debugging/monitoring
+    res.json({
+        message: 'Job status is delivered via webhook callback',
+        job_id: req.params.jobId,
+        note: 'If you need status polling, consider storing job state in a database'
+    });
+});
+
+// ============================================================================
+// LEGACY EMAIL ENDPOINT (keeping for backwards compatibility)
+// ============================================================================
 
 // Email report endpoint
 app.post('/api/analyze/email', async (req, res) => {
@@ -356,9 +633,12 @@ app.listen(PORT, () => {
     console.log(`📊 Health check: http://localhost:${PORT}/api/health`);
     console.log(`🔍 API endpoint: http://localhost:${PORT}/api/analyze`);
     console.log(`📄 PDF endpoint: http://localhost:${PORT}/api/analyze/pdf`);
+    console.log(`📋 Report endpoint (webhook): http://localhost:${PORT}/api/analyze/report`);
     console.log(`📧 Email endpoint: http://localhost:${PORT}/api/analyze/email`);
     console.log(`📧 Email test: http://localhost:${PORT}/api/email/test`);
     console.log(`📧 Email config: http://localhost:${PORT}/api/email/config`);
+    console.log(`---`);
+    console.log(`🔄 QStash: ${qstash ? '✅ Configured' : '❌ Not configured (set QSTASH_TOKEN)'}`);
 });
 
 module.exports = app;

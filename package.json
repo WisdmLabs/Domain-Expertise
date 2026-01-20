@@ -50,7 +50,8 @@
     "cors": "^2.8.5",
     "puppeteer": "^24.21.0",
     "nodemailer": "^7.0.6",
-    "dotenv": "^17.2.2"
+    "dotenv": "^17.2.2",
+    "@upstash/qstash": "^2.7.0"
   },
   "devDependencies": {
     "jest": "^29.7.0"
