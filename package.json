@@ -15,6 +15,11 @@
     "web": "node server.js",
     "dev": "node server.js",
     "server": "node start-server.js",
+    "test": "jest",
+    "test:unit": "jest tests/unit",
+    "test:integration": "jest tests/integration",
+    "test:coverage": "jest --coverage",
+    "test:watch": "jest --watch",
     "test-fix": "node test-performance-fix.js",
     "test-recommendations": "node test-fixes.js",
     "test-pdf": "node tests/pdf/test-pdf-generation.js",
@@ -47,7 +52,9 @@
     "nodemailer": "^7.0.6",
     "dotenv": "^17.2.2"
   },
-  "devDependencies": {},
+  "devDependencies": {
+    "jest": "^29.7.0"
+  },
   "engines": {
     "node": ">=14.0.0"
   },
