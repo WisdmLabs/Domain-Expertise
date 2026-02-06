@@ -520,6 +520,18 @@ class WP_Analyzer_Form {
 
     /**
      * Extract summary data from analysis response
+     *
+     * API Response structure:
+     * {
+     *   "success": true,
+     *   "data": {
+     *     "url": "...",
+     *     "wordpress": { "isWordPress": true, "indicators": [{"type": "meta_generator", "value": "WordPress 6.4.2"}, ...] },
+     *     "version": "6.4.2",
+     *     "theme": { "name": "Theme Name", "version": "1.0", "author": "..." },
+     *     "plugins": [ { "name": "Plugin", "slug": "plugin-slug", "version": "1.0", "outdated": false }, ... ]
+     *   }
+     * }
      */
     private function extract_summary_from_analysis($analysis_data) {
         $summary = array(
@@ -529,34 +541,49 @@ class WP_Analyzer_Form {
             'outdated_plugins' => 0
         );
 
-        if (!isset($analysis_data['data'])) {
+        // Validate response
+        if (!is_array($analysis_data)) {
+            error_log('WP Analyzer Form - Invalid analysis data (not an array)');
+            return $summary;
+        }
+
+        if (!isset($analysis_data['data']) || !is_array($analysis_data['data'])) {
+            error_log('WP Analyzer Form - No data field in analysis response');
             return $summary;
         }
 
         $data = $analysis_data['data'];
 
-        // WordPress version
-        if (isset($data['version'])) {
+        // WordPress version - try direct version field first
+        if (!empty($data['version']) && is_string($data['version'])) {
             $summary['wp_version'] = $data['version'];
-        } elseif (isset($data['wordpress']['indicators'])) {
+            error_log('WP Analyzer Form - Found WP version from data.version: ' . $data['version']);
+        } elseif (isset($data['wordpress']['indicators']) && is_array($data['wordpress']['indicators'])) {
+            // Fallback: extract from indicators
             foreach ($data['wordpress']['indicators'] as $indicator) {
-                if ($indicator['type'] === 'meta_generator' && !empty($indicator['value'])) {
+                if (isset($indicator['type']) && $indicator['type'] === 'meta_generator' && !empty($indicator['value'])) {
                     $summary['wp_version'] = $indicator['value'];
+                    error_log('WP Analyzer Form - Found WP version from indicator: ' . $indicator['value']);
                     break;
                 }
             }
         }
 
-        // Theme
-        if (isset($data['theme']['name'])) {
-            $summary['theme'] = $data['theme']['name'];
-        } elseif (isset($data['theme']) && is_string($data['theme'])) {
-            $summary['theme'] = $data['theme'];
+        // Theme - handle object with name property
+        if (isset($data['theme'])) {
+            if (is_array($data['theme']) && !empty($data['theme']['name'])) {
+                $summary['theme'] = $data['theme']['name'];
+                error_log('WP Analyzer Form - Found theme from data.theme.name: ' . $data['theme']['name']);
+            } elseif (is_string($data['theme']) && !empty($data['theme'])) {
+                $summary['theme'] = $data['theme'];
+                error_log('WP Analyzer Form - Found theme as string: ' . $data['theme']);
+            }
         }
 
-        // Plugin count
+        // Plugins count
         if (isset($data['plugins']) && is_array($data['plugins'])) {
             $summary['plugin_count'] = count($data['plugins']);
+            error_log('WP Analyzer Form - Found ' . $summary['plugin_count'] . ' plugins');
 
             // Count outdated plugins
             $outdated = 0;
@@ -566,7 +593,13 @@ class WP_Analyzer_Form {
                 }
             }
             $summary['outdated_plugins'] = $outdated;
+
+            if ($outdated > 0) {
+                error_log('WP Analyzer Form - Found ' . $outdated . ' outdated plugins');
+            }
         }
+
+        error_log('WP Analyzer Form - Summary extracted: WP=' . $summary['wp_version'] . ', Theme=' . $summary['theme'] . ', Plugins=' . $summary['plugin_count']);
 
         return $summary;
     }
