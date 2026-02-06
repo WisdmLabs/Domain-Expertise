@@ -367,76 +367,194 @@ class WP_Analyzer_Form {
     }
     
     /**
-     * Send data to analyzer API using webhook pattern
+     * Send data to analyzer API and send email with PDF attachment
+     * Uses synchronous approach: fetches PDF directly and sends via wp_mail()
      */
     private function send_to_analyzer_api($url, $email, $format) {
         // Get server URL from options
         $options = get_option('wp_analyzer_form_options');
         $server_url = isset($options['server_url']) ? $options['server_url'] : 'https://domain-expertise.vercel.app';
 
-        // Generate webhook URL for this WordPress site
-        $webhook_url = rest_url('wp-analyzer/v1/webhook');
+        error_log('WP Analyzer Form - Starting analysis for: ' . $url);
+        error_log('WP Analyzer Form - Email will be sent to: ' . $email);
 
-        // Generate a unique job ID for tracking
-        $job_id = wp_generate_uuid4();
-
-        // Store job data temporarily (expires in 1 hour)
-        set_transient('wp_analyzer_job_' . $job_id, array(
-            'email' => $email,
-            'url' => $url,
-            'format' => $format,
-            'created_at' => current_time('mysql')
-        ), HOUR_IN_SECONDS);
-
-        // Prepare request data for webhook-based endpoint
-        $request_data = array(
-            'url' => $url,
-            'webhook_url' => $webhook_url,
-            'format' => $format
-        );
-
-        // Log the request
-        error_log('WP Analyzer Form - Sending to webhook API: ' . json_encode($request_data));
-        error_log('WP Analyzer Form - Webhook URL: ' . $webhook_url);
-
-        // Make request to the new /api/analyze/report endpoint
-        // This returns immediately with job_id, actual work happens async
-        $response = wp_remote_post($server_url . '/api/analyze/report', array(
+        // Step 1: Get analysis summary data
+        $analysis_response = wp_remote_post($server_url . '/api/analyze', array(
             'headers' => array(
                 'Content-Type' => 'application/json',
             ),
-            'body' => json_encode($request_data),
-            'timeout' => 30, // Wait for queue confirmation
+            'body' => json_encode(array('url' => $url)),
+            'timeout' => 120,
             'sslverify' => true
         ));
 
-        if (is_wp_error($response)) {
-            error_log('WP Analyzer Form - API Error: ' . $response->get_error_message());
+        if (is_wp_error($analysis_response)) {
+            error_log('WP Analyzer Form - Analysis API Error: ' . $analysis_response->get_error_message());
+            $this->send_failure_email($email, $url, $analysis_response->get_error_message());
             return false;
         }
 
-        $response_code = wp_remote_retrieve_response_code($response);
-        $response_body = wp_remote_retrieve_body($response);
+        $analysis_code = wp_remote_retrieve_response_code($analysis_response);
+        $analysis_body = wp_remote_retrieve_body($analysis_response);
 
-        error_log('WP Analyzer Form - API Response (' . $response_code . '): ' . $response_body);
+        if ($analysis_code !== 200) {
+            error_log('WP Analyzer Form - Analysis API returned: ' . $analysis_code);
+            $this->send_failure_email($email, $url, 'Analysis failed with status ' . $analysis_code);
+            return false;
+        }
 
-        if ($response_code === 200) {
-            $data = json_decode($response_body, true);
-            if (isset($data['job_id'])) {
-                // Store the API's job_id mapped to the email
-                set_transient('wp_analyzer_api_job_' . $data['job_id'], array(
-                    'email' => $email,
-                    'url' => $url,
-                    'created_at' => current_time('mysql')
-                ), HOUR_IN_SECONDS);
+        $analysis_data = json_decode($analysis_body, true);
+        error_log('WP Analyzer Form - Analysis completed successfully');
 
-                error_log('WP Analyzer Form - Job queued successfully: ' . $data['job_id']);
-                return true;
+        // Extract summary from analysis data
+        $summary = $this->extract_summary_from_analysis($analysis_data);
+
+        // Step 2: Get PDF report
+        error_log('WP Analyzer Form - Fetching PDF report...');
+
+        $pdf_response = wp_remote_post($server_url . '/api/analyze/pdf', array(
+            'headers' => array(
+                'Content-Type' => 'application/json',
+            ),
+            'body' => json_encode(array(
+                'url' => $url,
+                'format' => $format
+            )),
+            'timeout' => 300, // PDF generation can take time
+            'sslverify' => true
+        ));
+
+        if (is_wp_error($pdf_response)) {
+            error_log('WP Analyzer Form - PDF API Error: ' . $pdf_response->get_error_message());
+            $this->send_failure_email($email, $url, 'PDF generation failed: ' . $pdf_response->get_error_message());
+            return false;
+        }
+
+        $pdf_code = wp_remote_retrieve_response_code($pdf_response);
+        $pdf_content = wp_remote_retrieve_body($pdf_response);
+        $content_type = wp_remote_retrieve_header($pdf_response, 'content-type');
+
+        if ($pdf_code !== 200 || strpos($content_type, 'application/pdf') === false) {
+            error_log('WP Analyzer Form - PDF API returned invalid response: ' . $pdf_code . ' - ' . $content_type);
+            $this->send_failure_email($email, $url, 'PDF generation failed with status ' . $pdf_code);
+            return false;
+        }
+
+        error_log('WP Analyzer Form - PDF received, size: ' . strlen($pdf_content) . ' bytes');
+
+        // Step 3: Save PDF to temp file and send email
+        $domain = parse_url($url, PHP_URL_HOST);
+        $filename = 'wordpress-analysis-' . sanitize_file_name($domain) . '-' . date('Y-m-d') . '.pdf';
+
+        $email_sent = $this->send_analysis_email_with_pdf($email, $url, $pdf_content, $filename, $summary);
+
+        if ($email_sent) {
+            error_log('WP Analyzer Form - Email sent successfully to: ' . $email);
+            return true;
+        } else {
+            error_log('WP Analyzer Form - Failed to send email to: ' . $email);
+            return false;
+        }
+    }
+
+    /**
+     * Extract summary data from analysis response
+     */
+    private function extract_summary_from_analysis($analysis_data) {
+        $summary = array(
+            'wp_version' => 'Unknown',
+            'theme' => 'Unknown',
+            'plugin_count' => 0,
+            'outdated_plugins' => 0
+        );
+
+        if (!isset($analysis_data['data'])) {
+            return $summary;
+        }
+
+        $data = $analysis_data['data'];
+
+        // WordPress version
+        if (isset($data['version'])) {
+            $summary['wp_version'] = $data['version'];
+        } elseif (isset($data['wordpress']['indicators'])) {
+            foreach ($data['wordpress']['indicators'] as $indicator) {
+                if ($indicator['type'] === 'meta_generator' && !empty($indicator['value'])) {
+                    $summary['wp_version'] = $indicator['value'];
+                    break;
+                }
             }
         }
 
-        error_log('WP Analyzer Form - Failed to queue job');
-        return false;
+        // Theme
+        if (isset($data['theme']['name'])) {
+            $summary['theme'] = $data['theme']['name'];
+        } elseif (isset($data['theme']) && is_string($data['theme'])) {
+            $summary['theme'] = $data['theme'];
+        }
+
+        // Plugin count
+        if (isset($data['plugins']) && is_array($data['plugins'])) {
+            $summary['plugin_count'] = count($data['plugins']);
+
+            // Count outdated plugins
+            $outdated = 0;
+            foreach ($data['plugins'] as $plugin) {
+                if (isset($plugin['outdated']) && $plugin['outdated'] === true) {
+                    $outdated++;
+                }
+            }
+            $summary['outdated_plugins'] = $outdated;
+        }
+
+        return $summary;
+    }
+
+    /**
+     * Send email with PDF content (not base64 encoded)
+     */
+    private function send_analysis_email_with_pdf($to_email, $site_url, $pdf_content, $filename, $summary) {
+        // Save PDF to temp file
+        $upload_dir = wp_upload_dir();
+        $temp_dir = $upload_dir['basedir'] . '/wp-analyzer-temp';
+
+        if (!file_exists($temp_dir)) {
+            wp_mkdir_p($temp_dir);
+            // Add .htaccess to prevent direct access
+            file_put_contents($temp_dir . '/.htaccess', 'deny from all');
+        }
+
+        $temp_file = $temp_dir . '/' . sanitize_file_name($filename);
+        $written = file_put_contents($temp_file, $pdf_content);
+
+        if ($written === false) {
+            error_log('WP Analyzer Form - Failed to write PDF to temp file');
+            return false;
+        }
+
+        error_log('WP Analyzer Form - PDF saved to: ' . $temp_file . ' (' . $written . ' bytes)');
+
+        // Extract domain for email
+        $domain = parse_url($site_url, PHP_URL_HOST);
+
+        // Prepare email
+        $subject = $this->generate_email_subject($domain, $summary);
+        $message = $this->generate_email_body($site_url, $summary);
+        $headers = array(
+            'Content-Type: text/html; charset=UTF-8',
+            'From: WordPress Analyzer <' . get_option('admin_email') . '>'
+        );
+        $attachments = array($temp_file);
+
+        // Send email
+        $sent = wp_mail($to_email, $subject, $message, $headers, $attachments);
+
+        // Clean up temp file
+        if (file_exists($temp_file)) {
+            unlink($temp_file);
+        }
+
+        return $sent;
     }
 
     /**
