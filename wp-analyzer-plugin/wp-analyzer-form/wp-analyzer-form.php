@@ -59,6 +59,9 @@ class WP_Analyzer_Form {
             add_action('wpcf7_before_send_mail', array($this, 'handle_cf7_submission'), 10, 1);
         }
 
+        // Register cron action for background PDF generation and email
+        add_action('wp_analyzer_send_report_email', array($this, 'process_background_report'), 10, 1);
+
         // Plugin activation/deactivation hooks
         register_activation_hook(__FILE__, array($this, 'activate'));
         register_deactivation_hook(__FILE__, array($this, 'deactivate'));
@@ -367,8 +370,9 @@ class WP_Analyzer_Form {
     }
     
     /**
-     * Send data to analyzer API and send email with PDF attachment
-     * Uses synchronous approach: fetches PDF directly and sends via wp_mail()
+     * Send data to analyzer API using two-step approach:
+     * Step 1 (Immediate): Get analysis data, store it, schedule background job
+     * Step 2 (Background): Fetch PDF and send email via WP Cron
      */
     private function send_to_analyzer_api($url, $email, $format) {
         // Get server URL from options
@@ -378,7 +382,7 @@ class WP_Analyzer_Form {
         error_log('WP Analyzer Form - Starting analysis for: ' . $url);
         error_log('WP Analyzer Form - Email will be sent to: ' . $email);
 
-        // Step 1: Get analysis summary data
+        // Step 1: Get analysis summary data (relatively fast - 10-30 seconds)
         $analysis_response = wp_remote_post($server_url . '/api/analyze', array(
             'headers' => array(
                 'Content-Type' => 'application/json',
@@ -409,9 +413,62 @@ class WP_Analyzer_Form {
         // Extract summary from analysis data
         $summary = $this->extract_summary_from_analysis($analysis_data);
 
-        // Step 2: Get PDF report
-        error_log('WP Analyzer Form - Fetching PDF report...');
+        // Generate unique job ID
+        $job_id = wp_generate_uuid4();
 
+        // Store job data in transient for background processing (expires in 1 hour)
+        $job_data = array(
+            'job_id' => $job_id,
+            'email' => $email,
+            'url' => $url,
+            'format' => $format,
+            'server_url' => $server_url,
+            'summary' => $summary,
+            'created_at' => current_time('mysql')
+        );
+
+        set_transient('wp_analyzer_job_' . $job_id, $job_data, HOUR_IN_SECONDS);
+
+        // Schedule background job to fetch PDF and send email
+        // Runs immediately (or as soon as WP Cron fires)
+        $scheduled = wp_schedule_single_event(time(), 'wp_analyzer_send_report_email', array($job_id));
+
+        if ($scheduled === false) {
+            error_log('WP Analyzer Form - Failed to schedule background job, trying direct spawn');
+            // Fallback: Try to spawn cron immediately
+            spawn_cron();
+        }
+
+        error_log('WP Analyzer Form - Background job scheduled: ' . $job_id);
+        error_log('WP Analyzer Form - User will receive email shortly at: ' . $email);
+
+        return true;
+    }
+
+    /**
+     * Background job: Fetch PDF and send email
+     * This runs via WP Cron after the initial form submission
+     */
+    public function process_background_report($job_id) {
+        error_log('WP Analyzer Form - Background job started: ' . $job_id);
+
+        // Get job data from transient
+        $job_data = get_transient('wp_analyzer_job_' . $job_id);
+
+        if (!$job_data) {
+            error_log('WP Analyzer Form - Job data not found for: ' . $job_id);
+            return false;
+        }
+
+        $email = $job_data['email'];
+        $url = $job_data['url'];
+        $format = $job_data['format'];
+        $server_url = $job_data['server_url'];
+        $summary = $job_data['summary'];
+
+        error_log('WP Analyzer Form - Processing PDF for: ' . $url);
+
+        // Fetch PDF report (this is the slow part)
         $pdf_response = wp_remote_post($server_url . '/api/analyze/pdf', array(
             'headers' => array(
                 'Content-Type' => 'application/json',
@@ -427,6 +484,7 @@ class WP_Analyzer_Form {
         if (is_wp_error($pdf_response)) {
             error_log('WP Analyzer Form - PDF API Error: ' . $pdf_response->get_error_message());
             $this->send_failure_email($email, $url, 'PDF generation failed: ' . $pdf_response->get_error_message());
+            delete_transient('wp_analyzer_job_' . $job_id);
             return false;
         }
 
@@ -437,16 +495,20 @@ class WP_Analyzer_Form {
         if ($pdf_code !== 200 || strpos($content_type, 'application/pdf') === false) {
             error_log('WP Analyzer Form - PDF API returned invalid response: ' . $pdf_code . ' - ' . $content_type);
             $this->send_failure_email($email, $url, 'PDF generation failed with status ' . $pdf_code);
+            delete_transient('wp_analyzer_job_' . $job_id);
             return false;
         }
 
         error_log('WP Analyzer Form - PDF received, size: ' . strlen($pdf_content) . ' bytes');
 
-        // Step 3: Save PDF to temp file and send email
+        // Generate filename and send email
         $domain = parse_url($url, PHP_URL_HOST);
         $filename = 'wordpress-analysis-' . sanitize_file_name($domain) . '-' . date('Y-m-d') . '.pdf';
 
         $email_sent = $this->send_analysis_email_with_pdf($email, $url, $pdf_content, $filename, $summary);
+
+        // Clean up transient
+        delete_transient('wp_analyzer_job_' . $job_id);
 
         if ($email_sent) {
             error_log('WP Analyzer Form - Email sent successfully to: ' . $email);
