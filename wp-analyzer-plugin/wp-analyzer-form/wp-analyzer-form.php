@@ -62,6 +62,9 @@ class WP_Analyzer_Form {
         // Register cron action for background PDF generation and email
         add_action('wp_analyzer_send_report_email', array($this, 'process_background_report'), 10, 1);
 
+        // Show admin notice if WP Cron is disabled
+        add_action('admin_notices', array($this, 'cron_disabled_notice'));
+
         // Plugin activation/deactivation hooks
         register_activation_hook(__FILE__, array($this, 'activate'));
         register_deactivation_hook(__FILE__, array($this, 'deactivate'));
@@ -76,6 +79,27 @@ class WP_Analyzer_Form {
             'callback' => array($this, 'handle_webhook_callback'),
             'permission_callback' => '__return_true', // Public endpoint (validated by job_id)
         ));
+
+        // Background processing endpoint (works even when WP Cron is disabled)
+        register_rest_route('wp-analyzer/v1', '/process', array(
+            'methods' => 'POST',
+            'callback' => array($this, 'rest_process_job'),
+            'permission_callback' => '__return_true',
+        ));
+    }
+
+    /**
+     * REST endpoint to process a job in background
+     */
+    public function rest_process_job($request) {
+        $job_id = $request->get_param('job_id');
+
+        if (empty($job_id) || !get_transient('wp_analyzer_job_' . $job_id)) {
+            return new WP_REST_Response(array('error' => 'Invalid job'), 400);
+        }
+
+        $this->process_background_report($job_id);
+        return new WP_REST_Response(array('success' => true), 200);
     }
     
     /**
@@ -104,7 +128,51 @@ class WP_Analyzer_Form {
      * Plugin deactivation
      */
     public function deactivate() {
-        // Clean up if needed
+        // Clean up scheduled cron events to avoid orphaned jobs
+        $this->clear_scheduled_events();
+    }
+
+    /**
+     * Clear all scheduled WP Cron events for this plugin
+     */
+    private function clear_scheduled_events() {
+        $crons = _get_cron_array();
+        if (empty($crons)) {
+            return;
+        }
+
+        foreach ($crons as $timestamp => $cron) {
+            if (isset($cron['wp_analyzer_send_report_email'])) {
+                foreach ($cron['wp_analyzer_send_report_email'] as $hook_key => $hook_data) {
+                    $args = isset($hook_data['args']) ? $hook_data['args'] : array();
+                    wp_unschedule_event($timestamp, 'wp_analyzer_send_report_email', $args);
+                }
+            }
+        }
+
+        error_log('WP Analyzer Form - Cleared scheduled cron events on deactivation');
+    }
+
+    /**
+     * Show admin notice when WP Cron is disabled
+     */
+    public function cron_disabled_notice() {
+        // Only show on plugin settings page
+        $screen = get_current_screen();
+        if (!$screen || $screen->id !== 'settings_page_wp-analyzer-form') {
+            return;
+        }
+
+        if (defined('DISABLE_WP_CRON') && DISABLE_WP_CRON) {
+            ?>
+            <div class="notice notice-info">
+                <p>
+                    <strong><?php _e('WP Analyzer Form:', 'wp-analyzer-form'); ?></strong>
+                    <?php _e('WP Cron is disabled. The plugin uses an alternative background processing method.', 'wp-analyzer-form'); ?>
+                </p>
+            </div>
+            <?php
+        }
     }
     
     /**
@@ -370,8 +438,16 @@ class WP_Analyzer_Form {
     }
     
     /**
+     * Check if WP Cron is disabled
+     */
+    private function is_cron_disabled() {
+        return defined('DISABLE_WP_CRON') && DISABLE_WP_CRON;
+    }
+
+    /**
      * Queue analysis job for background processing
      * Returns INSTANTLY - all API calls happen in background via WP Cron
+     * Falls back to synchronous processing if WP Cron is disabled
      */
     private function send_to_analyzer_api($url, $email, $format) {
         // Get server URL from options
@@ -395,13 +471,17 @@ class WP_Analyzer_Form {
 
         set_transient('wp_analyzer_job_' . $job_id, $job_data, 2 * HOUR_IN_SECONDS);
 
-        // Schedule background job - runs immediately via WP Cron
-        wp_schedule_single_event(time(), 'wp_analyzer_send_report_email', array($job_id));
+        // Check if WP Cron is disabled - use loopback request instead
+        if ($this->is_cron_disabled()) {
+            error_log('WP Analyzer Form - WP Cron disabled, using loopback request');
+            $this->trigger_loopback_process($job_id);
+        } else {
+            // WP Cron is enabled - use background processing
+            wp_schedule_single_event(time(), 'wp_analyzer_send_report_email', array($job_id));
+            $this->trigger_cron_async();
+            error_log('WP Analyzer Form - Job queued via WP Cron: ' . $job_id);
+        }
 
-        // Trigger cron immediately (non-blocking)
-        $this->trigger_cron_async();
-
-        error_log('WP Analyzer Form - Job queued: ' . $job_id);
         error_log('WP Analyzer Form - Email will be sent to: ' . $email);
 
         return true;
@@ -413,12 +493,26 @@ class WP_Analyzer_Form {
     private function trigger_cron_async() {
         $cron_url = site_url('wp-cron.php');
 
-        // Use non-blocking request to trigger cron
         wp_remote_post($cron_url, array(
             'timeout' => 0.01,
             'blocking' => false,
             'sslverify' => false,
             'body' => array('doing_wp_cron' => time())
+        ));
+    }
+
+    /**
+     * Trigger background processing via loopback request (non-blocking)
+     * Works even when WP Cron is disabled
+     */
+    private function trigger_loopback_process($job_id) {
+        $url = rest_url('wp-analyzer/v1/process');
+
+        wp_remote_post($url, array(
+            'timeout' => 0.01,
+            'blocking' => false,
+            'sslverify' => false,
+            'body' => array('job_id' => $job_id)
         ));
     }
 
@@ -519,6 +613,60 @@ class WP_Analyzer_Form {
     }
 
     /**
+     * Safely extract a string value from mixed data
+     * Handles arrays, objects, and nested structures
+     */
+    private function extract_string_value($value) {
+        // Already a string
+        if (is_string($value)) {
+            return trim($value);
+        }
+
+        // Numeric value - convert to string
+        if (is_numeric($value)) {
+            return (string) $value;
+        }
+
+        // Array - try to extract first meaningful string value
+        if (is_array($value)) {
+            // If it has a 'value' key, use that
+            if (isset($value['value']) && is_string($value['value'])) {
+                return trim($value['value']);
+            }
+            // If it has a 'version' key, use that
+            if (isset($value['version']) && is_string($value['version'])) {
+                return trim($value['version']);
+            }
+            // If it has a 'name' key, use that
+            if (isset($value['name']) && is_string($value['name'])) {
+                return trim($value['name']);
+            }
+            // Try first element if it's a simple indexed array
+            if (isset($value[0]) && is_string($value[0])) {
+                return trim($value[0]);
+            }
+            // Log the unexpected array structure
+            error_log('WP Analyzer Form - Unexpected array structure: ' . print_r($value, true));
+            return null;
+        }
+
+        // Object - try to convert
+        if (is_object($value)) {
+            if (isset($value->value)) {
+                return trim((string) $value->value);
+            }
+            if (isset($value->version)) {
+                return trim((string) $value->version);
+            }
+            if (isset($value->name)) {
+                return trim((string) $value->name);
+            }
+        }
+
+        return null;
+    }
+
+    /**
      * Extract summary data from analysis response
      *
      * API Response structure:
@@ -555,16 +703,22 @@ class WP_Analyzer_Form {
         $data = $analysis_data['data'];
 
         // WordPress version - try direct version field first
-        if (!empty($data['version']) && is_string($data['version'])) {
-            $summary['wp_version'] = $data['version'];
-            error_log('WP Analyzer Form - Found WP version from data.version: ' . $data['version']);
+        if (!empty($data['version'])) {
+            $version = $this->extract_string_value($data['version']);
+            if ($version) {
+                $summary['wp_version'] = $version;
+                error_log('WP Analyzer Form - Found WP version from data.version: ' . $version);
+            }
         } elseif (isset($data['wordpress']['indicators']) && is_array($data['wordpress']['indicators'])) {
             // Fallback: extract from indicators
             foreach ($data['wordpress']['indicators'] as $indicator) {
                 if (isset($indicator['type']) && $indicator['type'] === 'meta_generator' && !empty($indicator['value'])) {
-                    $summary['wp_version'] = $indicator['value'];
-                    error_log('WP Analyzer Form - Found WP version from indicator: ' . $indicator['value']);
-                    break;
+                    $version = $this->extract_string_value($indicator['value']);
+                    if ($version) {
+                        $summary['wp_version'] = $version;
+                        error_log('WP Analyzer Form - Found WP version from indicator: ' . $version);
+                        break;
+                    }
                 }
             }
         }
@@ -796,8 +950,29 @@ class WP_Analyzer_Form {
 
         $plugin_count = isset($summary['plugin_count']) ? intval($summary['plugin_count']) : 0;
         $outdated = isset($summary['outdated_plugins']) ? intval($summary['outdated_plugins']) : 0;
-        $wp_version = isset($summary['wp_version']) ? esc_html($summary['wp_version']) : 'Unknown';
-        $theme = isset($summary['theme']) ? esc_html($summary['theme']) : 'Unknown';
+
+        // Safely handle wp_version - ensure it's a string
+        $wp_version = 'Unknown';
+        if (isset($summary['wp_version'])) {
+            if (is_string($summary['wp_version'])) {
+                $wp_version = esc_html($summary['wp_version']);
+            } elseif (is_array($summary['wp_version'])) {
+                // Try to extract from array
+                $extracted = $this->extract_string_value($summary['wp_version']);
+                $wp_version = $extracted ? esc_html($extracted) : 'Unknown';
+            }
+        }
+
+        // Safely handle theme - ensure it's a string
+        $theme = 'Unknown';
+        if (isset($summary['theme'])) {
+            if (is_string($summary['theme'])) {
+                $theme = esc_html($summary['theme']);
+            } elseif (is_array($summary['theme'])) {
+                $extracted = $this->extract_string_value($summary['theme']);
+                $theme = $extracted ? esc_html($extracted) : 'Unknown';
+            }
+        }
 
         ob_start();
         ?>
