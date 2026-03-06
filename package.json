@@ -7,7 +7,6 @@
     "wp-analyze": "./cli.js"
   },
   "scripts": {
-    "postinstall": "npx puppeteer browsers install chrome",
     "start": "node cli.js",
     "analyze": "node cli.js",
     "analyze-html": "node cli.js --html",
@@ -44,6 +43,7 @@
   "author": "Your Name",
   "license": "MIT",
   "dependencies": {
+    "@sparticuz/chromium": "^143.0.4",
     "@upstash/qstash": "^2.7.0",
     "axios": "^1.12.2",
     "cheerio": "^1.1.2",
@@ -52,6 +52,7 @@
     "express": "^5.1.0",
     "nodemailer": "^7.0.6",
     "puppeteer": "^24.21.0",
+    "puppeteer-core": "^24.38.0",
     "puppeteer-extra": "^3.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2"
   },

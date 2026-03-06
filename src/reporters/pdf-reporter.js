@@ -1,15 +1,47 @@
 // File: ./src/reporters/pdf-reporter.js
 
-const puppeteer = require('puppeteer');
 const HtmlReporter = require('./html-reporter');
 const fs = require('fs');
 const path = require('path');
+
+// Use puppeteer-core + @sparticuz/chromium on Vercel (no bundled Chrome)
+// Use regular puppeteer locally (has its own Chrome)
+const isVercel = !!process.env.VERCEL;
+const puppeteer = isVercel ? require('puppeteer-core') : require('puppeteer');
 
 /**
  * PDF reporter for WordPress analysis results
  * Generates professional PDF reports using Puppeteer
  */
 class PdfReporter {
+    /**
+     * Launch a Puppeteer browser with appropriate settings for the environment
+     */
+    static async launchBrowser() {
+        const args = [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--no-zygote',
+            '--disable-gpu',
+            '--disable-web-security',
+            '--disable-features=VizDisplayCompositor'
+        ];
+
+        const options = { headless: true, args, timeout: 120000 };
+
+        if (isVercel) {
+            const chromium = require('@sparticuz/chromium');
+            options.args = chromium.args.concat(args);
+            options.executablePath = await chromium.executablePath();
+            options.headless = chromium.headless;
+        }
+
+        return puppeteer.launch(options);
+    }
+
     /**
      * Generate PDF report from analysis results
      * @param {Object} results - Analysis results
@@ -39,21 +71,7 @@ class PdfReporter {
             const html = HtmlReporter.generate(results, options);
             
             // Launch Puppeteer browser
-            browser = await puppeteer.launch({
-                headless: true,
-                args: [
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-dev-shm-usage',
-                    '--disable-accelerated-2d-canvas',
-                    '--no-first-run',
-                    '--no-zygote',
-                    '--disable-gpu',
-                    '--disable-web-security',
-                    '--disable-features=VizDisplayCompositor'
-                ],
-                timeout: 120000
-            });
+            browser = await this.launchBrowser();
 
             const page = await browser.newPage();
             
@@ -208,21 +226,7 @@ class PdfReporter {
             });
             
             // Launch Puppeteer browser
-            browser = await puppeteer.launch({
-                headless: true,
-                args: [
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-dev-shm-usage',
-                    '--disable-accelerated-2d-canvas',
-                    '--no-first-run',
-                    '--no-zygote',
-                    '--disable-gpu',
-                    '--disable-web-security',
-                    '--disable-features=VizDisplayCompositor'
-                ],
-                timeout: 120000
-            });
+            browser = await this.launchBrowser();
 
             const page = await browser.newPage();
             
