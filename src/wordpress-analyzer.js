@@ -262,7 +262,7 @@ class WordPressAnalyzer {
     async analyzePerformanceWithProgress(baseUrl, html) {
         console.log('⚡ Analyzing plugin performance impact...');
         const performanceAnalyzer = new PerformanceAnalyzer(baseUrl);
-        const performance = await performanceAnalyzer.analyze();
+        const performance = await performanceAnalyzer.analyze(html);
         
         if (performance) {
             const pluginCount = Object.keys(performance.plugin_performance).length;

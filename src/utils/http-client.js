@@ -169,6 +169,16 @@ class HttpClient {
                 };
 
                 const response = await axios.get(url, config);
+
+                // If we got a bot-protection status code, try Puppeteer before returning
+                if (this.usePuppeteerFallback && !options.noPuppeteerFallback &&
+                    (response.status === 403 || response.status === 502 || response.status === 503)) {
+                    console.log(`🛡️ Got HTTP ${response.status}, trying Puppeteer for ${url}`);
+                    if (domain) botProtectedDomains.add(domain);
+                    const puppeteerResult = await this.fetchWithPuppeteer(url, options);
+                    if (puppeteerResult) return puppeteerResult;
+                }
+
                 return response;
             } catch (error) {
                 if (this.usePuppeteerFallback && !options.noPuppeteerFallback) {

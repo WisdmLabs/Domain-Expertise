@@ -2468,37 +2468,44 @@ class HtmlReporter {
             };
         });
 
+        // Check if any plugin has size data (non-zero totalSize)
+        const hasSizeData = mergedPlugins.some(p => p.totalSize > 0);
+
         // Sort plugins by performance impact (worst first), then by name
         const sortedPlugins = mergedPlugins.sort((a, b) => {
-            // First priority: plugins with high performance impact
-            const aImpact = this.getPerformanceImpact(a.totalSize);
-            const bImpact = this.getPerformanceImpact(b.totalSize);
-            if (aImpact !== bImpact) {
-                const impactOrder = { 'HIGH': 3, 'MEDIUM': 2, 'LOW': 1 };
-                return impactOrder[bImpact] - impactOrder[aImpact];
+            if (hasSizeData) {
+                // First priority: plugins with high performance impact
+                const aImpact = this.getPerformanceImpact(a.totalSize);
+                const bImpact = this.getPerformanceImpact(b.totalSize);
+                if (aImpact !== bImpact) {
+                    const impactOrder = { 'HIGH': 3, 'MEDIUM': 2, 'LOW': 1 };
+                    return impactOrder[bImpact] - impactOrder[aImpact];
+                }
+                // Second priority: total size
+                if (a.totalSize !== b.totalSize) return b.totalSize - a.totalSize;
             }
-            // Second priority: total size
-            if (a.totalSize !== b.totalSize) return b.totalSize - a.totalSize;
-            // Third priority: name
+            // Fall back to name
             return (a.displayName || a.name).localeCompare(b.displayName || b.name);
         });
 
         const pluginsTableRows = sortedPlugins.map((plugin, index) => {
             const impactLevel = this.getPerformanceImpact(plugin.totalSize);
-            const impactClass = impactLevel === 'HIGH' ? 'red' : 
+            const impactClass = impactLevel === 'HIGH' ? 'red' :
                                impactLevel === 'MEDIUM' ? 'yellow' : 'green';
-            
+
             const totalSizeKB = Math.round(plugin.totalSize / 1024);
             const cssKB = Math.round(plugin.cssSize / 1024);
             const jsKB = Math.round(plugin.jsSize / 1024);
 
             // Generate recommendations based on plugin data and performance
             const recommendations = this.generatePluginRecommendations(plugin);
-            
+
             // Validate and format version
-            const displayVersion = plugin.version && this.isValidVersion(plugin.version) 
-                ? plugin.version 
+            const displayVersion = plugin.version && this.isValidVersion(plugin.version)
+                ? plugin.version
                 : 'Unknown';
+
+            const colSpan = hasSizeData ? 4 : 2;
 
             return `
                 <tr>
@@ -2509,17 +2516,18 @@ class HtmlReporter {
                     <td class="px-6 py-4 whitespace-nowrap version-cell">
                         <div class="text-sm text-gray-700 font-semibold">${displayVersion}</div>
                     </td>
+                    ${hasSizeData ? `
                     <td class="px-6 py-4 whitespace-nowrap size-cell">
                         <div class="text-sm font-semibold text-${impactClass}-600">${totalSizeKB}KB</div>
                         <div class="text-xs text-gray-500">CSS: ${cssKB}KB | JS: ${jsKB}KB</div>
                     </td>
                     <td class="px-6 py-4 whitespace-nowrap impact-cell">
                         <span class="px-3 py-1 inline-flex text-xs leading-5 font-semibold rounded-full bg-${impactClass}-100 text-${impactClass}-800">${impactLevel}</span>
-                    </td>
+                    </td>` : ''}
                 </tr>
                 ${recommendations.length > 0 ? `
                 <tr>
-                    <td class="px-6 py-4 bg-gray-50" colspan="4">
+                    <td class="px-6 py-4 bg-gray-50" colspan="${colSpan}">
                         <div class="text-sm font-semibold text-gray-800 mb-2">Recommendations</div>
                         <ul class="list-disc list-inside text-sm text-gray-700 space-y-1">
                             ${recommendations.map(rec => `<li>${rec}</li>`).join('')}
@@ -2539,8 +2547,9 @@ class HtmlReporter {
                                 <tr>
                                     <th class="px-6 py-3 text-xs font-semibold text-gray-600 uppercase tracking-wider">Plugin</th>
                                     <th class="px-6 py-3 text-xs font-semibold text-gray-600 uppercase tracking-wider">Version</th>
+                                    ${hasSizeData ? `
                                     <th class="px-6 py-3 text-xs font-semibold text-gray-600 uppercase tracking-wider">Total Size</th>
-                                    <th class="px-6 py-3 text-xs font-semibold text-gray-600 uppercase tracking-wider">Impact</th>
+                                    <th class="px-6 py-3 text-xs font-semibold text-gray-600 uppercase tracking-wider">Impact</th>` : ''}
                                 </tr>
                             </thead>
                             <tbody class="divide-y divide-gray-200">

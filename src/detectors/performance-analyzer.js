@@ -71,7 +71,8 @@ class PerformanceAnalyzer {
         if (!url.startsWith('http')) {
             url = new URL(url, this.baseUrl).href;
         }
-        
+
+        const filename = url.split('/').pop().split('?')[0];
         const startTime = Date.now();
         try {
             const response = await axios.head(url, {
@@ -79,13 +80,13 @@ class PerformanceAnalyzer {
                 timeout: 10000,
                 validateStatus: () => true
             });
-            
+
             const loadTime = (Date.now() - startTime) / 1000;
-            
+
             if (response.status === 200) {
                 let size = parseInt(response.headers['content-length'] || '0');
-                
-                // If HEAD doesn't give size, try GET with range
+
+                // If HEAD doesn't give size, try GET
                 if (size === 0) {
                     try {
                         const getResponse = await axios.get(url, {
@@ -93,15 +94,17 @@ class PerformanceAnalyzer {
                             timeout: 10000,
                             validateStatus: () => true
                         });
-                        size = getResponse.data.length;
+                        if (getResponse.status === 200) {
+                            size = Buffer.byteLength(getResponse.data, 'utf8');
+                        }
                     } catch (error) {
                         size = 0;
                     }
                 }
-                
+
                 return {
                     url: url,
-                    filename: url.split('/').pop().split('?')[0],
+                    filename: filename,
                     size: size,
                     size_kb: Math.round(size / 1024 * 100) / 100,
                     load_time: Math.round(loadTime * 1000) / 1000,
@@ -110,10 +113,20 @@ class PerformanceAnalyzer {
                 };
             }
         } catch (error) {
-            // Silently fail for resource analysis
+            // Network error — fall through
         }
-        
-        return null;
+
+        // Return basic info even when request fails (bot-protected sites)
+        // Resource count and blocking status are still useful without sizes
+        return {
+            url: url,
+            filename: filename,
+            size: 0,
+            size_kb: 0,
+            load_time: 0,
+            type: fileType,
+            status: 0
+        };
     }
 
     /**
@@ -435,9 +448,9 @@ class PerformanceAnalyzer {
      * Run comprehensive performance analysis
      * @returns {Object} Complete performance analysis data
      */
-    async analyze() {
+    async analyze(preloadedHtml = null) {
         console.log('🔍 Starting plugin performance analysis...');
-        
+
         try {
             // Optional: pull Core Web Vitals via PageSpeed Insights
             let pagespeedMobile = null;
@@ -445,34 +458,43 @@ class PerformanceAnalyzer {
             try {
                 console.log('🔍 Fetching PageSpeed Insights data...');
                 const PageSpeed = require('../integrations/pagespeed');
-                
+
                 // Fetch both mobile and desktop data in a single optimized call
                 const psiResult = await PageSpeed.fetchBoth(this.baseUrl);
-                
+
                 if (psiResult) {
                     pagespeedMobile = psiResult.mobile;
                     pagespeedDesktop = psiResult.desktop;
-                    
+
                     if (pagespeedMobile) {
                         console.log('✅ PSI mobile data fetched successfully');
                     }
                     if (pagespeedDesktop) {
                         console.log('✅ PSI desktop data fetched successfully');
                     }
-                    
+
                     if (!pagespeedMobile && !pagespeedDesktop) {
                         console.warn('⚠️ PSI data unavailable for both mobile and desktop - continuing without Core Web Vitals');
                     }
                 } else {
                     console.warn('⚠️ PSI fetch returned null - continuing without Core Web Vitals');
                 }
-                
+
             } catch (e) {
                 console.error('❌ PSI integration failed:', e.message);
                 // PSI optional; continue silently
             }
-            // Step 1: Basic page analysis
-            const { content, timing } = await this.fetchPageWithTiming();
+            // Step 1: Basic page analysis (use preloaded HTML if available)
+            let content, timing;
+            if (preloadedHtml) {
+                console.log('📦 Using preloaded HTML for performance analysis');
+                content = preloadedHtml;
+                timing = { total_time: 0, response_time: 0, content_length: preloadedHtml.length, status_code: 200 };
+            } else {
+                const result = await this.fetchPageWithTiming();
+                content = result.content;
+                timing = result.timing;
+            }
             if (!content) {
                 console.warn('No content fetched for performance analysis');
                 return null;
