@@ -837,7 +837,7 @@ class PluginDetector {
     async checkPluginVersion(pluginInfo) {
         try {
             const apiUrl = `${WORDPRESS_API.BASE_URL}${WORDPRESS_API.PLUGIN_INFO}${pluginInfo.name}.json`;
-            const response = await this.httpClient.fetchPage(apiUrl);
+            const response = await this.httpClient.fetchPage(apiUrl, { noPuppeteerFallback: true });
             
             if (response && response.data) {
                 const pluginData = typeof response.data === 'string' 

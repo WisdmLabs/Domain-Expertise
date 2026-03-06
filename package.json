@@ -44,14 +44,16 @@
   "author": "Your Name",
   "license": "MIT",
   "dependencies": {
+    "@upstash/qstash": "^2.7.0",
     "axios": "^1.12.2",
     "cheerio": "^1.1.2",
-    "express": "^5.1.0",
     "cors": "^2.8.5",
-    "puppeteer": "^24.21.0",
-    "nodemailer": "^7.0.6",
     "dotenv": "^17.2.2",
-    "@upstash/qstash": "^2.7.0"
+    "express": "^5.1.0",
+    "nodemailer": "^7.0.6",
+    "puppeteer": "^24.21.0",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
   },
   "devDependencies": {
     "jest": "^29.7.0"

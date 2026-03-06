@@ -92,9 +92,23 @@ class WordPressAnalyzer {
             // Fetch main page content
             console.log('📥 Fetching main page content...');
             const mainPageResponse = await this.httpClient.fetchPage(normalizedUrl);
-            
+
             if (!mainPageResponse) {
                 throw new Error(ERRORS.FETCH_FAILED);
+            }
+
+            // Check for HTTP errors that indicate the site is blocking us
+            if (mainPageResponse.status === 403) {
+                throw new Error(ERRORS.ACCESS_DENIED);
+            }
+            if (mainPageResponse.status === 503) {
+                throw new Error(ERRORS.SITE_UNAVAILABLE);
+            }
+            if (mainPageResponse.status === 429) {
+                throw new Error(ERRORS.RATE_LIMITED);
+            }
+            if (mainPageResponse.status >= 500) {
+                throw new Error(`Site returned server error (HTTP ${mainPageResponse.status})`);
             }
 
             const $ = cheerio.load(mainPageResponse.data);
@@ -118,6 +132,7 @@ class WordPressAnalyzer {
                 detectionTasks.push(
                     this.detectVersionWithProgress(normalizedUrl, $, mainPageResponse.data)
                         .then(version => { results.version = version; })
+                        .catch(err => { console.error('❌ Version detection failed:', err.message); })
                 );
             }
 
@@ -125,6 +140,7 @@ class WordPressAnalyzer {
                 detectionTasks.push(
                     this.detectThemeWithProgress(normalizedUrl, $)
                         .then(theme => { results.theme = theme; })
+                        .catch(err => { console.error('❌ Theme detection failed:', err.message); })
                 );
             }
 
@@ -132,6 +148,7 @@ class WordPressAnalyzer {
                 detectionTasks.push(
                     this.detectPluginsWithProgress(normalizedUrl, $, mainPageResponse.data)
                         .then(plugins => { results.plugins = plugins; })
+                        .catch(err => { console.error('❌ Plugin detection failed:', err.message); })
                 );
             }
 
@@ -140,22 +157,35 @@ class WordPressAnalyzer {
 
             // Step 3: Performance analysis (if enabled)
             if (this.options.includePerformance && results.wordpress.isWordPress) {
-                await this.analyzePerformanceWithProgress(normalizedUrl, mainPageResponse.data)
-                    .then(performance => { results.performance = performance; });
+                try {
+                    const performance = await this.analyzePerformanceWithProgress(normalizedUrl, mainPageResponse.data);
+                    results.performance = performance;
+                } catch (err) {
+                    console.error('❌ Performance analysis failed:', err.message);
+                }
             }
 
             // Step 4: Plugin recommendations (if enabled)
             if (this.options.includeRecommendations && results.wordpress.isWordPress) {
-                await this.generateRecommendationsWithProgress(normalizedUrl, $, mainPageResponse.data, results)
-                    .then(recommendations => { results.recommendations = recommendations; });
+                try {
+                    const recommendations = await this.generateRecommendationsWithProgress(normalizedUrl, $, mainPageResponse.data, results);
+                    results.recommendations = recommendations;
+                } catch (err) {
+                    console.error('❌ Recommendation generation failed:', err.message);
+                }
             }
 
             results.duration = Date.now() - startTime;
             console.log(`✅ Analysis completed in ${results.duration}ms`);
 
+            // Close shared Puppeteer browser after analysis
+            await HttpClient.closeSharedBrowser();
+
             return results;
 
         } catch (error) {
+            // Close shared Puppeteer browser on error too
+            await HttpClient.closeSharedBrowser();
             console.error('❌ Analysis failed:', error.message);
             throw error;
         }

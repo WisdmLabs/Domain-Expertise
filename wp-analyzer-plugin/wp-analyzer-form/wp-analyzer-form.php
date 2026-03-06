@@ -51,13 +51,11 @@ class WP_Analyzer_Form {
         add_action('admin_menu', array($this, 'add_admin_menu'));
         add_action('admin_init', array($this, 'admin_init'));
 
-        // Register REST API endpoint for webhook callback
+        // Register REST API endpoint for background processing
         add_action('rest_api_init', array($this, 'register_rest_routes'));
 
-        // Hook into Contact Form 7 if available
-        if (class_exists('WPCF7_ContactForm')) {
-            add_action('wpcf7_before_send_mail', array($this, 'handle_cf7_submission'), 10, 1);
-        }
+        // Hook into Contact Form 7 (action only fires if CF7 is active)
+        add_action('wpcf7_before_send_mail', array($this, 'handle_cf7_submission'), 10, 1);
 
         // Register cron action for background PDF generation and email
         add_action('wp_analyzer_send_report_email', array($this, 'process_background_report'), 10, 1);
@@ -74,12 +72,6 @@ class WP_Analyzer_Form {
      * Register REST API routes for webhook callback
      */
     public function register_rest_routes() {
-        register_rest_route('wp-analyzer/v1', '/webhook', array(
-            'methods' => 'POST',
-            'callback' => array($this, 'handle_webhook_callback'),
-            'permission_callback' => '__return_true', // Public endpoint (validated by job_id)
-        ));
-
         // Background processing endpoint (works even when WP Cron is disabled)
         register_rest_route('wp-analyzer/v1', '/process', array(
             'methods' => 'POST',
@@ -94,12 +86,12 @@ class WP_Analyzer_Form {
     public function rest_process_job($request) {
         $job_id = $request->get_param('job_id');
 
-        if (empty($job_id) || !get_transient('wp_analyzer_job_' . $job_id)) {
-            return new WP_REST_Response(array('error' => 'Invalid job'), 400);
+        if (empty($job_id)) {
+            return new WP_REST_Response(array('error' => 'Missing job_id'), 400);
         }
 
-        $this->process_background_report($job_id);
-        return new WP_REST_Response(array('success' => true), 200);
+        $result = $this->process_background_report($job_id);
+        return new WP_REST_Response(array('success' => (bool) $result), $result ? 200 : 409);
     }
     
     /**
@@ -523,13 +515,17 @@ class WP_Analyzer_Form {
     public function process_background_report($job_id) {
         error_log('WP Analyzer Form - Background job started: ' . $job_id);
 
-        // Get job data from transient
+        // Atomically claim the job: read then immediately delete the transient.
+        // This prevents duplicate processing if WP Cron fires the same event twice.
         $job_data = get_transient('wp_analyzer_job_' . $job_id);
 
         if (!$job_data) {
-            error_log('WP Analyzer Form - Job data not found for: ' . $job_id);
+            error_log('WP Analyzer Form - Job already claimed or not found: ' . $job_id);
             return false;
         }
+
+        // Delete immediately so no other process can claim this job
+        delete_transient('wp_analyzer_job_' . $job_id);
 
         $email = $job_data['email'];
         $url = $job_data['url'];
@@ -549,35 +545,45 @@ class WP_Analyzer_Form {
         if (is_wp_error($analysis_response)) {
             error_log('WP Analyzer Form - Analysis API Error: ' . $analysis_response->get_error_message());
             $this->send_failure_email($email, $url, $analysis_response->get_error_message());
-            delete_transient('wp_analyzer_job_' . $job_id);
             return false;
         }
 
         $analysis_code = wp_remote_retrieve_response_code($analysis_response);
         if ($analysis_code !== 200) {
-            error_log('WP Analyzer Form - Analysis failed with status: ' . $analysis_code);
-            $this->send_failure_email($email, $url, 'Analysis failed with status ' . $analysis_code);
-            delete_transient('wp_analyzer_job_' . $job_id);
+            $response_body = json_decode(wp_remote_retrieve_body($analysis_response), true);
+            $server_error = isset($response_body['error']) ? $response_body['error'] : 'Unknown error (HTTP ' . $analysis_code . ')';
+            error_log('WP Analyzer Form - Analysis failed: ' . $server_error);
+            $this->send_failure_email($email, $url, $server_error);
             return false;
         }
 
         $analysis_data = json_decode(wp_remote_retrieve_body($analysis_response), true);
+
+        if (!is_array($analysis_data) || empty($analysis_data['data'])) {
+            error_log('WP Analyzer Form - Invalid analysis response structure');
+            $this->send_failure_email($email, $url, 'Analysis returned invalid data');
+            return false;
+        }
+
         $summary = $this->extract_summary_from_analysis($analysis_data);
 
         error_log('WP Analyzer Form - Analysis complete, fetching PDF...');
 
-        // Step 2: Fetch PDF report
+        // Step 2: Fetch PDF report (pass analysis data so server skips re-analysis)
         $pdf_response = wp_remote_post($server_url . '/api/analyze/pdf', array(
             'headers' => array('Content-Type' => 'application/json'),
-            'body' => json_encode(array('url' => $url, 'format' => $format)),
-            'timeout' => 300,
+            'body' => json_encode(array(
+                'url' => $url,
+                'format' => $format,
+                'analysisData' => $analysis_data['data']
+            )),
+            'timeout' => 120,
             'sslverify' => true
         ));
 
         if (is_wp_error($pdf_response)) {
             error_log('WP Analyzer Form - PDF API Error: ' . $pdf_response->get_error_message());
             $this->send_failure_email($email, $url, 'PDF generation failed: ' . $pdf_response->get_error_message());
-            delete_transient('wp_analyzer_job_' . $job_id);
             return false;
         }
 
@@ -586,9 +592,10 @@ class WP_Analyzer_Form {
         $content_type = wp_remote_retrieve_header($pdf_response, 'content-type');
 
         if ($pdf_code !== 200 || strpos($content_type, 'application/pdf') === false) {
-            error_log('WP Analyzer Form - PDF invalid response: ' . $pdf_code);
-            $this->send_failure_email($email, $url, 'PDF generation failed with status ' . $pdf_code);
-            delete_transient('wp_analyzer_job_' . $job_id);
+            $pdf_error_body = json_decode($pdf_content, true);
+            $pdf_error = isset($pdf_error_body['error']) ? $pdf_error_body['error'] : 'PDF generation failed (HTTP ' . $pdf_code . ')';
+            error_log('WP Analyzer Form - PDF failed: ' . $pdf_error);
+            $this->send_failure_email($email, $url, $pdf_error);
             return false;
         }
 
@@ -599,9 +606,6 @@ class WP_Analyzer_Form {
         $filename = 'wordpress-analysis-' . sanitize_file_name($domain) . '-' . date('Y-m-d') . '.pdf';
 
         $email_sent = $this->send_analysis_email_with_pdf($email, $url, $pdf_content, $filename, $summary);
-
-        // Clean up
-        delete_transient('wp_analyzer_job_' . $job_id);
 
         if ($email_sent) {
             error_log('WP Analyzer Form - Email sent successfully to: ' . $email);
@@ -674,10 +678,10 @@ class WP_Analyzer_Form {
      *   "success": true,
      *   "data": {
      *     "url": "...",
-     *     "wordpress": { "isWordPress": true, "indicators": [{"type": "meta_generator", "value": "WordPress 6.4.2"}, ...] },
-     *     "version": "6.4.2",
+     *     "wordpress": { "isWordPress": true, "indicators": [...] },
+     *     "version": { "version": "6.4.2", "method": "meta_generator", "confidence": "high" },
      *     "theme": { "name": "Theme Name", "version": "1.0", "author": "..." },
-     *     "plugins": [ { "name": "Plugin", "slug": "plugin-slug", "version": "1.0", "outdated": false }, ... ]
+     *     "plugins": [ { "name": "Plugin", "slug": "plugin-slug", "version": "1.0", "isOutdated": false }, ... ]
      *   }
      * }
      */
@@ -742,7 +746,7 @@ class WP_Analyzer_Form {
             // Count outdated plugins
             $outdated = 0;
             foreach ($data['plugins'] as $plugin) {
-                if (isset($plugin['outdated']) && $plugin['outdated'] === true) {
+                if (!empty($plugin['isOutdated'])) {
                     $outdated++;
                 }
             }
@@ -781,126 +785,6 @@ class WP_Analyzer_Form {
         }
 
         error_log('WP Analyzer Form - PDF saved to: ' . $temp_file . ' (' . $written . ' bytes)');
-
-        // Extract domain for email
-        $domain = parse_url($site_url, PHP_URL_HOST);
-
-        // Prepare email
-        $subject = $this->generate_email_subject($domain, $summary);
-        $message = $this->generate_email_body($site_url, $summary);
-        $headers = array(
-            'Content-Type: text/html; charset=UTF-8',
-            'From: WordPress Analyzer <' . get_option('admin_email') . '>'
-        );
-        $attachments = array($temp_file);
-
-        // Send email
-        $sent = wp_mail($to_email, $subject, $message, $headers, $attachments);
-
-        // Clean up temp file
-        if (file_exists($temp_file)) {
-            unlink($temp_file);
-        }
-
-        return $sent;
-    }
-
-    /**
-     * Handle webhook callback from analyzer API
-     * This is called when the analysis is complete
-     */
-    public function handle_webhook_callback($request) {
-        // Get request body
-        $body = $request->get_json_params();
-
-        error_log('WP Analyzer Form - Webhook received: ' . json_encode(array(
-            'success' => isset($body['success']) ? $body['success'] : null,
-            'job_id' => isset($body['job_id']) ? $body['job_id'] : null,
-            'has_pdf' => isset($body['data']['pdf_base64']) ? 'yes' : 'no'
-        )));
-
-        // Validate required fields
-        if (!isset($body['job_id'])) {
-            error_log('WP Analyzer Form - Webhook missing job_id');
-            return new WP_REST_Response(array('error' => 'Missing job_id'), 400);
-        }
-
-        $job_id = sanitize_text_field($body['job_id']);
-
-        // Get stored job data
-        $job_data = get_transient('wp_analyzer_api_job_' . $job_id);
-
-        if (!$job_data) {
-            error_log('WP Analyzer Form - Unknown job_id: ' . $job_id);
-            return new WP_REST_Response(array('error' => 'Unknown job_id'), 404);
-        }
-
-        $email = $job_data['email'];
-        $site_url = $job_data['url'];
-
-        // Check if this is a success or failure
-        if (!isset($body['success']) || !$body['success']) {
-            $error_message = isset($body['error']) ? $body['error'] : 'Unknown error';
-            error_log('WP Analyzer Form - Job failed: ' . $error_message);
-
-            // Optionally send failure notification email
-            $this->send_failure_email($email, $site_url, $error_message);
-
-            // Clean up transient
-            delete_transient('wp_analyzer_api_job_' . $job_id);
-
-            return new WP_REST_Response(array('received' => true, 'status' => 'failure_processed'), 200);
-        }
-
-        // Extract PDF data
-        if (!isset($body['data']['pdf_base64'])) {
-            error_log('WP Analyzer Form - Webhook missing PDF data');
-            return new WP_REST_Response(array('error' => 'Missing PDF data'), 400);
-        }
-
-        $pdf_base64 = $body['data']['pdf_base64'];
-        $filename = isset($body['data']['filename']) ? $body['data']['filename'] : 'wordpress-analysis.pdf';
-        $summary = isset($body['data']['summary']) ? $body['data']['summary'] : array();
-
-        // Send email with PDF attachment
-        $email_sent = $this->send_analysis_email($email, $site_url, $pdf_base64, $filename, $summary);
-
-        // Clean up transient
-        delete_transient('wp_analyzer_api_job_' . $job_id);
-
-        if ($email_sent) {
-            error_log('WP Analyzer Form - Email sent successfully to: ' . $email);
-            return new WP_REST_Response(array('received' => true, 'email_sent' => true), 200);
-        } else {
-            error_log('WP Analyzer Form - Failed to send email to: ' . $email);
-            return new WP_REST_Response(array('received' => true, 'email_sent' => false), 200);
-        }
-    }
-
-    /**
-     * Send analysis report email with PDF attachment
-     */
-    private function send_analysis_email($to_email, $site_url, $pdf_base64, $filename, $summary) {
-        // Decode PDF
-        $pdf_content = base64_decode($pdf_base64);
-
-        if (!$pdf_content) {
-            error_log('WP Analyzer Form - Failed to decode PDF');
-            return false;
-        }
-
-        // Save PDF to temp file
-        $upload_dir = wp_upload_dir();
-        $temp_dir = $upload_dir['basedir'] . '/wp-analyzer-temp';
-
-        if (!file_exists($temp_dir)) {
-            wp_mkdir_p($temp_dir);
-            // Add .htaccess to prevent direct access
-            file_put_contents($temp_dir . '/.htaccess', 'deny from all');
-        }
-
-        $temp_file = $temp_dir . '/' . sanitize_file_name($filename);
-        file_put_contents($temp_file, $pdf_content);
 
         // Extract domain for email
         $domain = parse_url($site_url, PHP_URL_HOST);

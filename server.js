@@ -95,19 +95,25 @@ app.post('/api/analyze', async (req, res) => {
 // PDF report endpoint
 app.post('/api/analyze/pdf', async (req, res) => {
     try {
-        const { url, filename, format, options } = req.body;
-        
+        const { url, filename, format, options, analysisData } = req.body;
+
         if (!url) {
-            return res.status(400).json({ 
+            return res.status(400).json({
                 error: 'URL is required',
-                success: false 
+                success: false
             });
         }
 
         console.log(`🔍 Starting PDF analysis for: ${url}`);
-        
-        // Perform analysis
-        const results = await analyzer.analyzeSite(url);
+
+        // Use provided analysis data or perform fresh analysis
+        let results;
+        if (analysisData) {
+            console.log('📦 Using provided analysis data (skipping re-analysis)');
+            results = analysisData;
+        } else {
+            results = await analyzer.analyzeSite(url);
+        }
         
         console.log(`✅ Analysis completed for: ${url}`);
         console.log('📄 Generating PDF report...');

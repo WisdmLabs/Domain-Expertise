@@ -22,34 +22,57 @@ class EnhancedWordPressDetector {
      */
     async detect(baseUrl, $, html) {
         const indicators = [];
-        const detectionMethods = [
+
+        // Phase 1: Fast local detection (no HTTP requests) — runs first
+        const localMethods = [
             () => this.detectFromMetaTags($),
             () => this.detectFromHtmlStructure($, html),
             () => this.detectFromAssetPaths($),
             () => this.detectFromJavaScriptVariables($, html),
             () => this.detectFromCssClasses($),
             () => this.detectFromComments($, html),
-            () => this.detectFromRestApi(baseUrl),
-            () => this.detectFromWordPressFiles(baseUrl),
-            () => this.detectFromHeaders(baseUrl),
-            () => this.detectFromSitemap(baseUrl),
-            () => this.detectFromRobotsTxt(baseUrl),
-            () => this.detectFromFeedEndpoints(baseUrl),
-            () => this.detectFromAdminEndpoints(baseUrl),
-            () => this.detectFromPluginThemes(baseUrl),
             () => this.detectFromInlineScripts($, html)
         ];
 
-        // Run all detection methods
-        for (const method of detectionMethods) {
+        for (const method of localMethods) {
             try {
                 const result = await method();
                 if (result && result.indicators) {
                     indicators.push(...result.indicators);
                 }
             } catch (error) {
-                // Continue with other methods if one fails
                 continue;
+            }
+        }
+
+        // If we already have high confidence from HTML alone, skip network probes
+        const earlyConfidence = this.calculateConfidence(indicators);
+        if (earlyConfidence === 'high') {
+            console.log('✅ WordPress detected from HTML analysis — skipping network probes');
+        } else {
+            // Phase 2: Network-based detection (only if needed)
+            const networkMethods = [
+                () => this.detectFromRestApi(baseUrl),
+                () => this.detectFromWordPressFiles(baseUrl),
+                () => this.detectFromHeaders(baseUrl),
+                () => this.detectFromSitemap(baseUrl),
+                () => this.detectFromRobotsTxt(baseUrl),
+                () => this.detectFromFeedEndpoints(baseUrl),
+                () => this.detectFromAdminEndpoints(baseUrl),
+                () => this.detectFromPluginThemes(baseUrl)
+            ];
+
+            for (const method of networkMethods) {
+                try {
+                    const result = await method();
+                    if (result && result.indicators) {
+                        indicators.push(...result.indicators);
+                    }
+                    // Stop early if we reach high confidence
+                    if (this.calculateConfidence(indicators) === 'high') break;
+                } catch (error) {
+                    continue;
+                }
             }
         }
 

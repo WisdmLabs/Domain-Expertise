@@ -165,9 +165,13 @@ module.exports = {
     // Error messages
     ERRORS: {
         INVALID_URL: 'Invalid URL provided',
-        FETCH_FAILED: 'Failed to fetch page content',
+        FETCH_FAILED: 'Failed to fetch page content. The site may be down or blocking our requests.',
         NOT_WORDPRESS: 'Site does not appear to be WordPress',
         TIMEOUT: 'Request timeout exceeded',
-        NETWORK_ERROR: 'Network error occurred'
+        NETWORK_ERROR: 'Network error occurred',
+        BOT_PROTECTION: 'Site has bot protection enabled and is blocking analysis requests',
+        RATE_LIMITED: 'Too many requests - site is rate limiting our access',
+        SITE_UNAVAILABLE: 'Site is temporarily unavailable',
+        ACCESS_DENIED: 'Access to site was denied'
     }
 };
