@@ -3,6 +3,8 @@
 const axios = require('axios');
 const { HTTP } = require('../config/constants');
 
+const isVercel = !!process.env.VERCEL;
+
 // Shared Puppeteer state across all HttpClient instances
 let sharedBrowser = null;
 let browserLaunchPromise = null;
@@ -19,8 +21,7 @@ class HttpClient {
         this.userAgent = options.userAgent || HTTP.USER_AGENT;
         this.timeout = options.timeout || HTTP.TIMEOUT;
         this.maxRedirects = options.maxRedirects || HTTP.MAX_REDIRECTS;
-        // Disable Puppeteer fallback on Vercel — no Chrome binary for HTTP fetching
-        this.usePuppeteerFallback = options.usePuppeteerFallback !== false && !process.env.VERCEL;
+        this.usePuppeteerFallback = options.usePuppeteerFallback !== false;
     }
 
     /**
@@ -38,24 +39,39 @@ class HttpClient {
 
         browserLaunchPromise = (async () => {
             try {
-                const puppeteer = require('puppeteer-extra');
-                if (!stealthInitialized) {
-                    const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-                    puppeteer.use(StealthPlugin());
-                    stealthInitialized = true;
-                }
+                const launchArgs = [
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-blink-features=AutomationControlled',
+                    '--window-size=1920,1080'
+                ];
+
+                const launchOptions = {
+                    headless: 'new',
+                    args: launchArgs
+                };
 
                 console.log('🌐 Launching shared Puppeteer browser...');
-                sharedBrowser = await puppeteer.launch({
-                    headless: 'new',
-                    args: [
-                        '--no-sandbox',
-                        '--disable-setuid-sandbox',
-                        '--disable-dev-shm-usage',
-                        '--disable-blink-features=AutomationControlled',
-                        '--window-size=1920,1080'
-                    ]
-                });
+
+                if (isVercel) {
+                    // On Vercel: use puppeteer-core + @sparticuz/chromium
+                    const puppeteerCore = require('puppeteer-core');
+                    const chromium = require('@sparticuz/chromium');
+                    launchOptions.args = chromium.args.concat(launchArgs);
+                    launchOptions.executablePath = await chromium.executablePath();
+                    launchOptions.headless = chromium.headless;
+                    sharedBrowser = await puppeteerCore.launch(launchOptions);
+                } else {
+                    // Locally: use puppeteer-extra with stealth plugin
+                    const puppeteer = require('puppeteer-extra');
+                    if (!stealthInitialized) {
+                        const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+                        puppeteer.use(StealthPlugin());
+                        stealthInitialized = true;
+                    }
+                    sharedBrowser = await puppeteer.launch(launchOptions);
+                }
 
                 sharedBrowser.on('disconnected', () => {
                     sharedBrowser = null;
