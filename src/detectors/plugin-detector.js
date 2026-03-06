@@ -416,17 +416,23 @@ class PluginDetector {
         if (!versions || versions.size === 0) {
             return null;
         }
-        
+
         // Convert to array and filter out obviously wrong versions
         const versionArray = Array.from(versions);
         const validVersions = [];
-        
+
         for (const v of versionArray) {
             const versionStr = String(v).trim();
-            
+
             // Skip empty or very short versions
             if (!versionStr || versionStr.length < 2) continue;
-            
+
+            // Skip git hashes (long hex strings)
+            if (/^[0-9a-f]{10,}$/i.test(versionStr)) continue;
+
+            // Skip timestamps (very large numbers)
+            if (/^[0-9]{10,}$/.test(versionStr)) continue;
+
             // Accept various version formats
             if (/^[0-9]+\.[0-9]+(?:\.[0-9]+)?(?:\.[0-9]+)?$/.test(versionStr) || // Standard semver
                 /^[0-9]+\.[0-9]+$/.test(versionStr) || // Major.minor
@@ -434,17 +440,32 @@ class PluginDetector {
                 validVersions.push(versionStr);
             }
         }
-        
+
         if (validVersions.length === 0) {
             // Return any non-empty version if no valid format found
-            const nonEmptyVersions = versionArray.filter(v => String(v).trim().length > 0);
+            const nonEmptyVersions = versionArray.filter(v => {
+                const s = String(v).trim();
+                // Skip hashes and timestamps in fallback too
+                return s.length > 0 && !/^[0-9a-f]{10,}$/i.test(s) && !/^[0-9]{10,}$/.test(s);
+            });
             return nonEmptyVersions.length > 0 ? String(nonEmptyVersions[0]).trim() : null;
         }
-        
-        // Return the most specific version (most dots)
-        return validVersions.reduce((best, current) => {
-            return current.split('.').length > best.split('.').length ? current : best;
+
+        // Sort by most dots first, then by highest version number (descending)
+        // This picks the actual plugin version over bundled library versions
+        validVersions.sort((a, b) => {
+            const aParts = a.split('.').map(Number);
+            const bParts = b.split('.').map(Number);
+            // Prefer more specific versions (more dots)
+            if (bParts.length !== aParts.length) return bParts.length - aParts.length;
+            // Same specificity: pick the highest version (plugin version > bundled lib version)
+            for (let i = 0; i < aParts.length; i++) {
+                if (bParts[i] !== aParts[i]) return bParts[i] - aParts[i];
+            }
+            return 0;
         });
+
+        return validVersions[0];
     }
 
     /**
