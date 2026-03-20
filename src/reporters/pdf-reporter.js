@@ -296,17 +296,42 @@ class PdfReporter {
                     break-inside: avoid;
                     page-break-inside: avoid;
                 }
-                
+
+                /* Prevent Core Web Vitals and PageSpeed sections from being cut */
+                .cwv-section,
+                .cwv-grid,
+                .cwv-card,
+                .performance-scores-grid,
+                .score-card,
+                .additional-metrics,
+                .metrics-grid,
+                .metric-item {
+                    break-inside: avoid;
+                    page-break-inside: avoid;
+                }
+
+                /* Keep CWV title with its grid */
+                .cwv-title {
+                    break-after: avoid;
+                    page-break-after: avoid;
+                }
+
+                /* Keep metrics title with its grid */
+                .metrics-title {
+                    break-after: avoid;
+                    page-break-after: avoid;
+                }
+
                 .section-title {
                     break-after: avoid;
                     page-break-after: avoid;
                 }
-                
+
                 .executive-summary {
                     break-after: avoid;
                     page-break-after: avoid;
                 }
-                
+
                 .header {
                     break-after: avoid;
                     page-break-after: avoid;

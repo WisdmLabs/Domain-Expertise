@@ -68,28 +68,16 @@ class WordPressOrgAPI {
      */
     async fetchPluginInfo(pluginSlug) {
         try {
-            const params = new URLSearchParams({
-                action: 'plugin_information',
-                request: JSON.stringify({
-                    slug: pluginSlug,
-                    fields: {
-                        active_installs: true,
-                        sections: false,
-                        short_description: true,
-                        ratings: true,
-                        last_updated: true,
-                        homepage: true,
-                        tags: true
+            // Use the 1.0 JSON endpoint — the 1.2 endpoint returns 400 for GET requests
+            const response = await axios.get(
+                `https://api.wordpress.org/plugins/info/1.0/${encodeURIComponent(pluginSlug)}.json`,
+                {
+                    timeout: 10000,
+                    headers: {
+                        'User-Agent': 'WordPress Analyzer/1.0'
                     }
-                })
-            });
-
-            const response = await axios.get(`${this.baseUrl}?${params}`, {
-                timeout: 10000,
-                headers: {
-                    'User-Agent': 'WordPress Analyzer/1.0'
                 }
-            });
+            );
 
             if (response.data && !response.data.error) {
                 const data = response.data;

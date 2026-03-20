@@ -573,12 +573,18 @@ class PluginDetector {
                     return false;
                 }
             }
-            
+
+            // Skip names that are clearly promotional/descriptive text, not plugin slugs
+            // Valid plugin slugs are lowercase alphanumeric with hyphens, typically under 60 chars
+            if (plugin.name.length > 60 || /[.!?🎁]/.test(plugin.name) || /\s{2,}/.test(plugin.name)) {
+                return false;
+            }
+
             // Skip plugins with very low confidence and no version, unless they have multiple detection methods
             if (plugin.confidence === 'low' && !plugin.version && plugin.detectionMethods.length < 2) {
                 return false;
             }
-            
+
             return true;
         });
     }

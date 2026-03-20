@@ -108,7 +108,7 @@ class WP_Analyzer_Form {
     public function activate() {
         // Set default options
         $default_options = array(
-            'server_url' => 'https://domain-expertise.vercel.app',
+            'server_url' => 'https://mydomain-project.vercel.app',
             'default_format' => 'print',
             'cf7_form_id' => ''
         );
@@ -268,7 +268,7 @@ class WP_Analyzer_Form {
      */
     public function server_url_callback() {
         $options = get_option('wp_analyzer_form_options');
-        $server_url = isset($options['server_url']) ? $options['server_url'] : 'https://domain-expertise.vercel.app';
+        $server_url = isset($options['server_url']) ? $options['server_url'] : 'https://mydomain-project.vercel.app';
         echo '<input type="url" id="server_url" name="wp_analyzer_form_options[server_url]" value="' . esc_attr($server_url) . '" class="regular-text" />';
         echo '<p class="description">' . __('The URL of the external WordPress analyzer server (without trailing slash).', 'wp-analyzer-form') . '</p>';
     }
@@ -444,7 +444,7 @@ class WP_Analyzer_Form {
     private function send_to_analyzer_api($url, $email, $format) {
         // Get server URL from options
         $options = get_option('wp_analyzer_form_options');
-        $server_url = isset($options['server_url']) ? $options['server_url'] : 'https://domain-expertise.vercel.app';
+        $server_url = isset($options['server_url']) ? $options['server_url'] : 'https://mydomain-project.vercel.app';
 
         // Generate unique job ID
         $job_id = wp_generate_uuid4();

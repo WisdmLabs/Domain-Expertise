@@ -56,6 +56,7 @@ class EnhancedVersionDetector {
         // HIGH CONFIDENCE METHODS - Only these can definitively identify WordPress version
         const highConfidenceMethods = [
             () => this.detectFromMetaGenerator($),
+            () => this.detectFromWpIncludesAssets($, html),
             () => this.detectFromReadmeFile(baseUrl),
             () => this.detectFromRestAPI(baseUrl),
             // () => this.detectFromWordPressCoreFiles(baseUrl) // Disabled to avoid delays
@@ -825,6 +826,37 @@ class EnhancedVersionDetector {
      * @param {string} html - Raw HTML content
      * @returns {Object|null} Version info or null
      */
+    /**
+     * Detect WordPress version from wp-includes asset URLs
+     * Most WordPress sites expose the core version via ?ver= on wp-includes scripts/styles
+     */
+    detectFromWpIncludesAssets($, html) {
+        // Pattern: wp-includes/...?ver=X.X.X — the ver param on core assets IS the WP version
+        const wpIncludesPattern = /wp-includes\/[^"']*\?ver=(\d+\.\d+(?:\.\d+)?)/g;
+        const versionCounts = {};
+
+        let match;
+        while ((match = wpIncludesPattern.exec(html)) !== null) {
+            const ver = match[1];
+            if (this.isValidWordPressVersion(ver)) {
+                versionCounts[ver] = (versionCounts[ver] || 0) + 1;
+            }
+        }
+
+        // Pick the most frequently occurring version (consensus across multiple assets)
+        const sorted = Object.entries(versionCounts).sort((a, b) => b[1] - a[1]);
+        if (sorted.length > 0) {
+            return {
+                version: sorted[0][0],
+                method: 'wp_includes_assets',
+                confidence: CONFIDENCE_LEVELS.HIGH,
+                source: `wp-includes assets (${sorted[0][1]} matches)`
+            };
+        }
+
+        return null;
+    }
+
     detectFromWordPressComments(html) {
         // Only look for WordPress-specific comments, not generic version comments
         const wpCommentPatterns = [

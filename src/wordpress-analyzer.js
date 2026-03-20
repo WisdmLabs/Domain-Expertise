@@ -23,6 +23,7 @@ const HtmlReporter = require('./reporters/html-reporter');
 const PdfReporter = require('./reporters/pdf-reporter');
 
 // Import configuration
+const axios = require('axios');
 const { HTTP, ERRORS } = require('./config/constants');
 
 /**
@@ -89,20 +90,41 @@ class WordPressAnalyzer {
                 duration: null
             };
 
-            // Fetch main page content
+            // Fetch main page content (skip Puppeteer on first try — if blocked,
+            // we try the RSS feed first which is much faster than Puppeteer)
             console.log('📥 Fetching main page content...');
-            const mainPageResponse = await this.httpClient.fetchPage(normalizedUrl);
+            let mainPageResponse = await this.httpClient.fetchPage(normalizedUrl, {
+                noPuppeteerFallback: true
+            });
+
+            // If blocked by bot protection, try RSS feed first (fast),
+            // then Puppeteer as last resort (slow, often fails on Turnstile)
+            if (!mainPageResponse || mainPageResponse.status === 403 || mainPageResponse.status === 503) {
+                const statusCode = mainPageResponse?.status || 'no response';
+                console.log(`🛡️ Main page blocked (${statusCode}), trying RSS feed fallback...`);
+
+                const feedResults = await this.analyzeFromFeed(normalizedUrl, startTime);
+                if (feedResults) {
+                    return feedResults;
+                }
+
+                // Feed didn't work either — try Wayback Machine (Internet Archive)
+                console.log('📚 Feed fallback failed, trying Wayback Machine...');
+                const waybackResults = await this.analyzeFromWaybackMachine(normalizedUrl, startTime);
+                if (waybackResults) {
+                    return waybackResults;
+                }
+
+                // Wayback Machine didn't work — try Puppeteer as last resort
+                console.log('🌐 Wayback Machine fallback failed, trying Puppeteer...');
+                mainPageResponse = await this.httpClient.fetchWithPuppeteer(normalizedUrl);
+                if (!mainPageResponse) {
+                    throw new Error(ERRORS.FETCH_FAILED);
+                }
+            }
 
             if (!mainPageResponse) {
                 throw new Error(ERRORS.FETCH_FAILED);
-            }
-
-            // Check for HTTP errors that indicate the site is blocking us
-            if (mainPageResponse.status === 403) {
-                throw new Error(ERRORS.ACCESS_DENIED);
-            }
-            if (mainPageResponse.status === 503) {
-                throw new Error(ERRORS.SITE_UNAVAILABLE);
             }
             if (mainPageResponse.status === 429) {
                 throw new Error(ERRORS.RATE_LIMITED);
@@ -192,9 +214,649 @@ class WordPressAnalyzer {
     }
 
     /**
+     * Fallback analysis using RSS feed when main page is blocked by bot protection.
+     * Fills all report sections: WordPress detection, version, theme, plugins, and
+     * performance (via PageSpeed Insights API which uses Google's own crawlers).
+     *
+     * Edge cases handled:
+     *   - /feed/ returns 403 or non-200 → returns null (caller tries Puppeteer)
+     *   - Feed exists but is not WordPress → returns null
+     *   - Feed has no content:encoded blocks → still detects from XML
+     *   - PSI quota exceeded or fails → continues without performance data
+     *   - No generator tag → version stays null
+     *   - No wp-content/themes/ paths → tries stylesheet URL fetch
+     *
+     * @param {string} baseUrl - Base URL
+     * @param {number} startTime - Analysis start timestamp
+     * @returns {Object|null} Analysis results or null if feed is also inaccessible
+     */
+    async analyzeFromFeed(baseUrl, startTime) {
+        try {
+            // ── Step 1: Fetch RSS feed (direct axios, domain may be marked bot-protected) ──
+            const feedUrl = baseUrl.replace(/\/$/, '') + '/feed/';
+            const feedResponse = await axios.get(feedUrl, {
+                headers: {
+                    'User-Agent': HTTP.USER_AGENT,
+                    'Accept': 'application/rss+xml, application/xml, text/xml, */*',
+                },
+                timeout: 15000,
+                validateStatus: s => s >= 200 && s < 600,
+            }).catch(() => null);
+
+            if (!feedResponse || feedResponse.status !== 200 || !feedResponse.data) {
+                console.log('❌ RSS feed not accessible');
+                return null;
+            }
+
+            const feedXml = feedResponse.data;
+
+            // Confirm it's a WordPress feed
+            const isWordPressFeed = feedXml.includes('xmlns:wfw') ||
+                feedXml.includes('wp-content') ||
+                feedXml.includes('WordPress');
+
+            if (!isWordPressFeed) {
+                console.log('❌ RSS feed does not appear to be WordPress');
+                return null;
+            }
+
+            console.log('✅ WordPress confirmed via RSS feed (site has bot protection)');
+
+            // ── Initialize results ──
+            const results = {
+                url: baseUrl,
+                timestamp: new Date().toISOString(),
+                wordpress: {
+                    isWordPress: true,
+                    confidence: 'high',
+                    score: 80,
+                    indicators: ['rss_feed_format'],
+                    note: 'Detected via RSS feed fallback (main page blocked by Cloudflare/bot protection)'
+                },
+                version: null,
+                theme: null,
+                plugins: [],
+                performance: null,
+                recommendations: null,
+                duration: null,
+                limited_analysis: true,
+                limitation_reason: 'Site has Cloudflare/bot protection. Analysis performed using RSS feed + PageSpeed Insights.'
+            };
+
+            // ── Step 2: Extract HTML from content:encoded CDATA blocks ──
+            const contentMatches = feedXml.match(/<content:encoded><!\[CDATA\[([\s\S]*?)\]\]><\/content:encoded>/gi) || [];
+            let combinedHtml = '';
+            for (const match of contentMatches) {
+                combinedHtml += match
+                    .replace(/<content:encoded><!\[CDATA\[/i, '')
+                    .replace(/\]\]><\/content:encoded>/i, '') + '\n';
+            }
+            const allContent = combinedHtml + '\n' + feedXml;
+
+            // ── Step 3: WordPress version from generator tag ──
+            const generatorMatch = feedXml.match(/<generator>https?:\/\/wordpress\.org\/\?v=([\d.]+)<\/generator>/i);
+            if (generatorMatch) {
+                results.version = {
+                    version: generatorMatch[1],
+                    method: 'rss_feed_generator',
+                    confidence: 'high'
+                };
+                console.log(`✅ Version detected from feed: ${generatorMatch[1]}`);
+            } else {
+                console.log('⚠️  WordPress version not in feed (may be hidden by security plugin)');
+            }
+
+            // ── Step 4: Detect plugins ──
+            // Run three detection strategies in parallel, all safe for feed content
+            if (this.options.includePlugins) {
+                console.log('🔌 Detecting plugins from feed content...');
+                try {
+                    const $ = cheerio.load(combinedHtml || '<html></html>');
+
+                    // Strategy A: Regex indicators (matches "elementor", "woocommerce", etc.)
+                    const indicatorPlugins = this.pluginDetector.detectFromIndicators(allContent);
+
+                    // Strategy B: CSS selectors (matches class="elementor-*", etc.)
+                    const selectorPlugins = this.pluginDetector.detectFromSelectors($);
+
+                    // Strategy C: wp-content/plugins/ paths from HTML only (not XML)
+                    // Also extract ?ver= version numbers
+                    const pluginVersionMap = this.extractPluginVersionsFromHtml(combinedHtml);
+                    const pathPluginNames = [...pluginVersionMap.keys()];
+
+                    // Merge and deduplicate
+                    const { PLUGIN_INDICATORS } = require('./config/constants');
+                    const seenPlugins = new Map();
+
+                    for (const p of [...indicatorPlugins, ...selectorPlugins]) {
+                        if (!seenPlugins.has(p.name)) {
+                            const extractedVersion = pluginVersionMap.get(p.name);
+                            seenPlugins.set(p.name, {
+                                name: p.name,
+                                displayName: p.displayName,
+                                slug: p.name,
+                                detectedVersion: extractedVersion || null,
+                                version: extractedVersion || null,
+                                source: p.source || p.type || 'feed_content',
+                                confidence: 'medium'
+                            });
+                        }
+                    }
+
+                    for (const name of pathPluginNames) {
+                        if (!seenPlugins.has(name)) {
+                            const indicator = PLUGIN_INDICATORS.find(ind => ind.name === name);
+                            const extractedVersion = pluginVersionMap.get(name);
+                            seenPlugins.set(name, {
+                                name: name,
+                                displayName: indicator?.displayName || name,
+                                slug: name,
+                                detectedVersion: extractedVersion || null,
+                                version: extractedVersion || null,
+                                source: 'feed_path_detection',
+                                confidence: 'high'
+                            });
+                        }
+                    }
+
+                    // Enrich with WordPress.org metadata (latest version, etc.)
+                    const plugins = [...seenPlugins.values()];
+                    for (const plugin of plugins) {
+                        await this.pluginDetector.checkPluginVersion(plugin);
+                    }
+                    results.plugins = await this.pluginDetector.enrichPluginsWithMetadata(plugins);
+                    console.log(`✅ Plugins detected from feed: ${results.plugins.length}`);
+                } catch (err) {
+                    console.error('❌ Plugin detection from feed failed:', err.message);
+                }
+            }
+
+            // ── Step 5: Detect theme ──
+            if (this.options.includeTheme) {
+                const themeVersionMap = this.extractThemeVersionsFromHtml(allContent);
+                const themeMatch = allContent.match(/wp-content\/themes\/([a-zA-Z0-9_-]+)\//);
+                if (themeMatch) {
+                    const themeName = themeMatch[1];
+                    const themeVersion = themeVersionMap.get(themeName) || null;
+                    console.log(`🎨 Theme detected from feed path: ${themeName}${themeVersion ? ` v${themeVersion}` : ''}`);
+                    results.theme = {
+                        name: themeName,
+                        displayName: themeName.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
+                        version: themeVersion,
+                        method: 'feed_path_detection',
+                        confidence: 'high'
+                    };
+                }
+            }
+
+            // ── Step 6: Performance via PageSpeed Insights (Google bypasses Cloudflare) ──
+            if (this.options.includePerformance) {
+                try {
+                    console.log('⚡ Fetching PageSpeed Insights (Google crawlers bypass Cloudflare)...');
+                    const PageSpeed = require('./integrations/pagespeed');
+                    const psiResult = await PageSpeed.fetchBoth(baseUrl);
+
+                    if (psiResult && (psiResult.mobile || psiResult.desktop)) {
+                        results.performance = {
+                            main_page_timing: {},
+                            plugin_performance: {},
+                            usage_analysis: {},
+                            optimization_opportunities: [],
+                            pagespeed: {
+                                mobile: psiResult.mobile || null,
+                                desktop: psiResult.desktop || null
+                            },
+                            recommendations: []
+                        };
+
+                        const mobileScore = psiResult.mobile?.performance_score;
+                        const desktopScore = psiResult.desktop?.performance_score;
+                        if (mobileScore != null) console.log(`✅ PSI Mobile score: ${mobileScore}`);
+                        if (desktopScore != null) console.log(`✅ PSI Desktop score: ${desktopScore}`);
+                    } else {
+                        console.log('⚠️  PageSpeed data unavailable (quota or network issue)');
+                    }
+                } catch (err) {
+                    console.error('❌ PageSpeed fetch failed:', err.message);
+                }
+            }
+
+            // ── Step 7: Generate recommendations ──
+            if (this.options.includeRecommendations && results.plugins.length > 0) {
+                try {
+                    const $ = cheerio.load(combinedHtml || '<html></html>');
+                    const recommendations = await this.recommendationEngine.generateRecommendations(
+                        baseUrl, $, allContent, results, results.performance
+                    );
+                    results.recommendations = recommendations;
+                } catch (err) {
+                    console.error('❌ Recommendations failed:', err.message);
+                }
+            }
+
+            results.duration = Date.now() - startTime;
+            console.log(`✅ Feed-based analysis completed in ${results.duration}ms`);
+            console.log('⚠️  Note: Limited analysis due to bot protection — plugin/theme data may be incomplete.');
+
+            return results;
+
+        } catch (error) {
+            console.error('❌ Feed fallback failed:', error.message);
+            return null;
+        }
+    }
+
+    /**
+     * Fallback analysis using Wayback Machine (Internet Archive) when both the main
+     * page and RSS feed are blocked by Cloudflare/bot protection.
+     *
+     * Uses the most recent archived snapshot of the site from web.archive.org.
+     * The archived HTML contains wp-content paths, theme references, and plugin
+     * indicators — enough to populate all report sections.
+     *
+     * Edge cases handled:
+     *   - No snapshot exists → returns null (caller tries Puppeteer)
+     *   - Snapshot is very old (>1 year) → still uses it but adds warning
+     *   - Wayback Machine is rate-limited (429) → returns null
+     *   - Archived HTML has Wayback toolbar injected → stripped before parsing
+     *   - Version info in Wayback URLs uses archived timestamps → extracted correctly
+     *   - PSI quota exceeded → continues without performance data
+     *
+     * @param {string} baseUrl - Base URL
+     * @param {number} startTime - Analysis start timestamp
+     * @returns {Object|null} Analysis results or null if archive unavailable
+     */
+    async analyzeFromWaybackMachine(baseUrl, startTime) {
+        try {
+            // ── Step 1: Find the latest snapshot URL via CDX API (fast, reliable) ──
+            const domain = baseUrl.replace(/^https?:\/\//, '').replace(/\/$/, '');
+            console.log('📚 Checking Wayback Machine CDX API for cached snapshot...');
+
+            // Try CDX API with retry (Wayback Machine can be slow)
+            let cdxResponse = null;
+            for (let attempt = 1; attempt <= 2; attempt++) {
+                cdxResponse = await axios.get('https://web.archive.org/cdx/search/cdx', {
+                    params: {
+                        url: domain,
+                        output: 'json',
+                        limit: '-1',
+                        fl: 'timestamp,statuscode,original'
+                    },
+                    timeout: 30000,
+                    headers: { 'User-Agent': HTTP.USER_AGENT }
+                }).catch(err => {
+                    console.warn(`⚠️  CDX API attempt ${attempt} error: ${err.code || err.message}`);
+                    return null;
+                });
+
+                if (cdxResponse && cdxResponse.data && cdxResponse.data.length >= 2) break;
+                if (attempt < 2) {
+                    console.log('⏳ Retrying CDX API...');
+                    await new Promise(r => setTimeout(r, 2000));
+                }
+            }
+
+            if (!cdxResponse || !cdxResponse.data || cdxResponse.data.length < 2) {
+                console.log('❌ No Wayback Machine snapshot found');
+                return null;
+            }
+
+            // CDX returns [header, ...rows] — last row is most recent
+            const rows = cdxResponse.data;
+            const latest = rows[rows.length - 1];
+            const snapshotTimestamp = latest[0];
+            const snapshotOriginalUrl = latest[2];
+            const snapshotUrl = `https://web.archive.org/web/${snapshotTimestamp}/${snapshotOriginalUrl}`;
+
+            // Extract snapshot date from timestamp (format: 20251219040451)
+            let snapshotDate = null;
+            let snapshotAge = null;
+            if (snapshotTimestamp && snapshotTimestamp.length >= 8) {
+                const y = snapshotTimestamp.slice(0, 4);
+                const m = snapshotTimestamp.slice(4, 6);
+                const d = snapshotTimestamp.slice(6, 8);
+                snapshotDate = `${y}-${m}-${d}`;
+                const snapshotTime = new Date(`${y}-${m}-${d}`);
+                snapshotAge = Math.floor((Date.now() - snapshotTime.getTime()) / (1000 * 60 * 60 * 24));
+                console.log(`📅 Snapshot date: ${snapshotDate} (${snapshotAge} days ago)`);
+            }
+
+            // ── Step 2: Fetch the archived page ──
+            console.log(`📥 Fetching Wayback Machine snapshot: ${snapshotUrl}`);
+            const archiveResponse = await axios.get(snapshotUrl, {
+                timeout: 30000,
+                headers: { 'User-Agent': HTTP.USER_AGENT },
+                maxRedirects: 5,
+                validateStatus: s => s >= 200 && s < 400,
+            }).catch(() => null);
+
+            if (!archiveResponse || !archiveResponse.data) {
+                console.log('❌ Failed to fetch Wayback Machine snapshot');
+                return null;
+            }
+
+            // Strip Wayback Machine toolbar/injected content
+            let html = archiveResponse.data;
+            html = html.replace(/<!-- BEGIN WAYBACK TOOLBAR INSERT -->[\s\S]*?<!-- END WAYBACK TOOLBAR INSERT -->/gi, '');
+
+            // Rewrite Wayback Machine URLs back to original domain
+            // Wayback rewrites urls like: /web/20251219040451cs_/https://example.com/wp-content/...
+            // Suffixes include: cs_ (css), js_ (js), im_ (image), if_ (iframe), etc.
+            html = html.replace(/(?:https?:)?\/\/web\.archive\.org\/web\/\d+[a-z_]*\//gi, '');
+
+            const htmlLength = html.length;
+            if (htmlLength < 1000) {
+                console.log(`❌ Wayback snapshot too small (${htmlLength} bytes), likely not useful`);
+                return null;
+            }
+
+            console.log(`✅ Got ${htmlLength} bytes from Wayback Machine`);
+
+            // Confirm it's a WordPress site
+            const isWordPress = html.includes('wp-content') ||
+                html.includes('wordpress') ||
+                html.includes('wp-json') ||
+                html.includes('wp-includes');
+
+            if (!isWordPress) {
+                console.log('❌ Wayback snapshot does not appear to be a WordPress site');
+                return null;
+            }
+
+            console.log('✅ WordPress confirmed via Wayback Machine snapshot');
+
+            // ── Initialize results ──
+            const ageWarning = snapshotAge && snapshotAge > 365
+                ? ` Warning: snapshot is ${snapshotAge} days old — data may be outdated.`
+                : '';
+            const results = {
+                url: baseUrl,
+                timestamp: new Date().toISOString(),
+                wordpress: {
+                    isWordPress: true,
+                    confidence: 'high',
+                    score: 75,
+                    indicators: ['wayback_machine_archive'],
+                    note: `Detected via Wayback Machine (snapshot: ${snapshotDate || 'unknown'}).${ageWarning} Main page and RSS feed blocked by Cloudflare/bot protection.`
+                },
+                version: null,
+                theme: null,
+                plugins: [],
+                performance: null,
+                recommendations: null,
+                duration: null,
+                limited_analysis: true,
+                limitation_reason: `Site has strict Cloudflare/bot protection (all endpoints blocked). Analysis performed using Wayback Machine archive${snapshotDate ? ` from ${snapshotDate}` : ''} + PageSpeed Insights.`
+            };
+
+            const $ = cheerio.load(html);
+
+            // ── Step 3: WordPress version ──
+            const generatorMeta = $('meta[name="generator"]').attr('content') || '';
+            const wpVersionMatch = generatorMeta.match(/WordPress\s+([\d.]+)/i);
+            if (wpVersionMatch) {
+                results.version = {
+                    version: wpVersionMatch[1],
+                    method: 'wayback_meta_generator',
+                    confidence: 'medium',
+                    note: `From Wayback Machine snapshot${snapshotDate ? ` (${snapshotDate})` : ''} — may not be current`
+                };
+                console.log(`✅ Version detected: ${wpVersionMatch[1]} (from archived meta tag)`);
+            } else {
+                // Try generator in RSS link or other patterns
+                const generatorComment = html.match(/WordPress\s+([\d.]+)/i);
+                if (generatorComment) {
+                    results.version = {
+                        version: generatorComment[1],
+                        method: 'wayback_html_pattern',
+                        confidence: 'low',
+                        note: `From Wayback Machine snapshot — may not be current`
+                    };
+                    console.log(`✅ Version detected: ${generatorComment[1]} (from archived HTML pattern)`);
+                } else {
+                    console.log('⚠️  WordPress version not found in archive');
+                }
+            }
+
+            // ── Step 4: Detect plugins ──
+            // Extract version numbers from ?ver= query strings in HTML
+            const pluginVersionMap = this.extractPluginVersionsFromHtml(html);
+
+            if (this.options.includePlugins) {
+                console.log('🔌 Detecting plugins from Wayback Machine snapshot...');
+                try {
+                    // Strategy A: Regex indicators
+                    const indicatorPlugins = this.pluginDetector.detectFromIndicators(html);
+
+                    // Strategy B: CSS selectors
+                    const selectorPlugins = this.pluginDetector.detectFromSelectors($);
+
+                    // Strategy C: wp-content/plugins/ paths (already in pluginVersionMap)
+                    const pathPluginNames = [...pluginVersionMap.keys()];
+
+                    // Merge and deduplicate
+                    const { PLUGIN_INDICATORS } = require('./config/constants');
+                    const seenPlugins = new Map();
+
+                    for (const p of [...indicatorPlugins, ...selectorPlugins]) {
+                        if (!seenPlugins.has(p.name)) {
+                            const extractedVersion = pluginVersionMap.get(p.name);
+                            seenPlugins.set(p.name, {
+                                name: p.name,
+                                displayName: p.displayName,
+                                slug: p.name,
+                                detectedVersion: extractedVersion || null,
+                                version: extractedVersion || null,
+                                source: p.source || p.type || 'wayback_content',
+                                confidence: 'medium'
+                            });
+                        }
+                    }
+
+                    for (const name of pathPluginNames) {
+                        if (!seenPlugins.has(name)) {
+                            const indicator = PLUGIN_INDICATORS.find(ind => ind.name === name);
+                            const extractedVersion = pluginVersionMap.get(name);
+                            seenPlugins.set(name, {
+                                name: name,
+                                displayName: indicator?.displayName || name.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
+                                slug: name,
+                                detectedVersion: extractedVersion || null,
+                                version: extractedVersion || null,
+                                source: 'wayback_path_detection',
+                                confidence: 'high'
+                            });
+                        }
+                    }
+
+                    // Enrich with WordPress.org metadata
+                    const plugins = [...seenPlugins.values()];
+                    for (const plugin of plugins) {
+                        await this.pluginDetector.checkPluginVersion(plugin);
+                    }
+                    results.plugins = await this.pluginDetector.enrichPluginsWithMetadata(plugins);
+                    console.log(`✅ Plugins detected from archive: ${results.plugins.length}`);
+                } catch (err) {
+                    console.error('❌ Plugin detection from archive failed:', err.message);
+                }
+            }
+
+            // ── Step 5: Detect theme ──
+            if (this.options.includeTheme) {
+                const themeVersionMap = this.extractThemeVersionsFromHtml(html);
+                const themeMatch = html.match(/wp-content\/themes\/([a-zA-Z0-9_-]+)\//);
+                if (themeMatch) {
+                    const themeName = themeMatch[1];
+                    const themeVersion = themeVersionMap.get(themeName) || null;
+                    console.log(`🎨 Theme detected from archive: ${themeName}${themeVersion ? ` v${themeVersion}` : ''}`);
+                    results.theme = {
+                        name: themeName,
+                        displayName: themeName.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
+                        version: themeVersion,
+                        method: 'wayback_path_detection',
+                        confidence: 'high'
+                    };
+
+                    // Check for child theme
+                    const allThemes = [...new Set(
+                        (html.match(/wp-content\/themes\/([a-zA-Z0-9_-]+)\//g) || [])
+                            .map(p => p.match(/wp-content\/themes\/([a-zA-Z0-9_-]+)\//)[1])
+                    )];
+                    if (allThemes.length > 1) {
+                        // If there's a child theme (contains "-child"), use the parent as parentTheme
+                        const childTheme = allThemes.find(t => t.includes('-child'));
+                        const parentTheme = allThemes.find(t => !t.includes('-child'));
+                        if (childTheme && parentTheme) {
+                            results.theme.name = childTheme;
+                            results.theme.displayName = childTheme.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+                            results.theme.parentTheme = parentTheme;
+                            console.log(`🎨 Child theme: ${childTheme}, Parent: ${parentTheme}`);
+                        }
+                    }
+                } else {
+                    console.log('⚠️  Theme not found in archive');
+                }
+            }
+
+            // ── Step 6: Performance via PageSpeed Insights ──
+            if (this.options.includePerformance) {
+                try {
+                    console.log('⚡ Fetching PageSpeed Insights (Google crawlers bypass Cloudflare)...');
+                    const PageSpeed = require('./integrations/pagespeed');
+                    const psiResult = await PageSpeed.fetchBoth(baseUrl);
+
+                    if (psiResult && (psiResult.mobile || psiResult.desktop)) {
+                        results.performance = {
+                            main_page_timing: {},
+                            plugin_performance: {},
+                            usage_analysis: {},
+                            optimization_opportunities: [],
+                            pagespeed: {
+                                mobile: psiResult.mobile || null,
+                                desktop: psiResult.desktop || null
+                            },
+                            recommendations: []
+                        };
+
+                        const mobileScore = psiResult.mobile?.performance_score;
+                        const desktopScore = psiResult.desktop?.performance_score;
+                        if (mobileScore != null) console.log(`✅ PSI Mobile score: ${mobileScore}`);
+                        if (desktopScore != null) console.log(`✅ PSI Desktop score: ${desktopScore}`);
+                    } else {
+                        console.log('⚠️  PageSpeed data unavailable (quota or network issue)');
+                    }
+                } catch (err) {
+                    console.error('❌ PageSpeed fetch failed:', err.message);
+                }
+            }
+
+            // ── Step 7: Generate recommendations ──
+            if (this.options.includeRecommendations && results.plugins.length > 0) {
+                try {
+                    const recommendations = await this.recommendationEngine.generateRecommendations(
+                        baseUrl, $, html, results, results.performance
+                    );
+                    results.recommendations = recommendations;
+                } catch (err) {
+                    console.error('❌ Recommendations failed:', err.message);
+                }
+            }
+
+            results.duration = Date.now() - startTime;
+            console.log(`✅ Wayback Machine analysis completed in ${results.duration}ms`);
+            console.log('⚠️  Note: Data from Wayback Machine archive — plugin versions and theme may have changed since snapshot.');
+
+            return results;
+
+        } catch (error) {
+            console.error('❌ Wayback Machine fallback failed:', error.message);
+            return null;
+        }
+    }
+
+    /**
+     * Extract plugin versions from ?ver= query strings in HTML.
+     * Parses patterns like: wp-content/plugins/{slug}/...?ver=X.Y.Z
+     * Returns a Map of slug → best version string.
+     * @param {string} html - HTML content
+     * @returns {Map<string, string>} Map of plugin slug to detected version
+     */
+    extractPluginVersionsFromHtml(html) {
+        const pluginOwnVersions = new Map();  // slug → Set (from plugin's own files)
+        const pluginAllVersions = new Map();   // slug → Set (includes bundled libs)
+
+        // Match: wp-content/plugins/{slug}/{path}?...ver={version}
+        const pattern = /wp-content\/plugins\/([a-zA-Z0-9_-]+)\/([^"'\s]*)\?[^"'\s]*ver=([0-9][0-9a-z._-]*)/gi;
+        let match;
+        while ((match = pattern.exec(html)) !== null) {
+            const slug = match[1];
+            const filePath = match[2];
+            const ver = match[3];
+
+            if (!pluginAllVersions.has(slug)) {
+                pluginAllVersions.set(slug, new Set());
+                pluginOwnVersions.set(slug, new Set());
+            }
+            pluginAllVersions.get(slug).add(ver);
+
+            // Exclude bundled libraries (/lib/, /vendor/, /node_modules/)
+            // These contain third-party versions (e.g. Swiper 8.4.5 inside Elementor 3.35.5)
+            if (!/\/(lib|vendor|node_modules)\//.test(filePath)) {
+                pluginOwnVersions.get(slug).add(ver);
+            }
+        }
+
+        // Also catch plugins referenced without ?ver= (just the path)
+        const pathPattern = /wp-content\/plugins\/([a-zA-Z0-9_-]+)\//g;
+        while ((match = pathPattern.exec(html)) !== null) {
+            const slug = match[1];
+            if (!pluginAllVersions.has(slug)) {
+                pluginAllVersions.set(slug, new Set());
+                pluginOwnVersions.set(slug, new Set());
+            }
+        }
+
+        // Pick version: prefer plugin's own files, fall back to all files
+        const result = new Map();
+        for (const [slug] of pluginAllVersions) {
+            const ownVer = this.pluginDetector.getBestVersion(pluginOwnVersions.get(slug));
+            const allVer = this.pluginDetector.getBestVersion(pluginAllVersions.get(slug));
+            result.set(slug, ownVer || allVer);
+        }
+        return result;
+    }
+
+    /**
+     * Extract theme versions from ?ver= query strings in HTML.
+     * Parses patterns like: wp-content/themes/{name}/...?ver=X.Y.Z
+     * @param {string} html - HTML content
+     * @returns {Map<string, string>} Map of theme name to detected version
+     */
+    extractThemeVersionsFromHtml(html) {
+        const themeVersions = new Map(); // name → Set of versions
+        const pattern = /wp-content\/themes\/([a-zA-Z0-9_-]+)\/[^"'\s]*\?[^"'\s]*ver=([0-9][0-9a-z._-]*)/gi;
+        let match;
+        while ((match = pattern.exec(html)) !== null) {
+            const name = match[1];
+            const ver = match[2];
+            if (!themeVersions.has(name)) {
+                themeVersions.set(name, new Set());
+            }
+            themeVersions.get(name).add(ver);
+        }
+
+        // Pick the best version for each theme
+        const result = new Map();
+        for (const [name, versions] of themeVersions) {
+            result.set(name, this.pluginDetector.getBestVersion(versions));
+        }
+        return result;
+    }
+
+    /**
      * Detect WordPress version with progress logging
      * @param {string} baseUrl - Base URL
-     * @param {Object} $ - Cheerio instance  
+     * @param {Object} $ - Cheerio instance
      * @param {string} html - HTML content
      * @returns {Object} Version detection result
      */

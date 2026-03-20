@@ -55,13 +55,17 @@ class HttpClient {
                 console.log('🌐 Launching shared Puppeteer browser...');
 
                 if (isVercel) {
-                    // On Vercel: use puppeteer-core + @sparticuz/chromium
+                    // On Vercel: use puppeteer-core + @sparticuz/chromium + stealth
                     const puppeteerCore = require('puppeteer-core');
                     const chromium = require('@sparticuz/chromium');
+                    const { addExtra } = require('puppeteer-extra');
+                    const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+                    const puppeteerWithStealth = addExtra(puppeteerCore);
+                    puppeteerWithStealth.use(StealthPlugin());
                     launchOptions.args = chromium.args.concat(launchArgs);
                     launchOptions.executablePath = await chromium.executablePath();
                     launchOptions.headless = chromium.headless;
-                    sharedBrowser = await puppeteerCore.launch(launchOptions);
+                    sharedBrowser = await puppeteerWithStealth.launch(launchOptions);
                 } else {
                     // Locally: use puppeteer-extra with stealth plugin
                     const puppeteer = require('puppeteer-extra');
@@ -169,11 +173,18 @@ class HttpClient {
                 const config = {
                     headers: {
                         'User-Agent': this.userAgent,
-                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                        'Accept-Language': 'en-US,en;q=0.5',
-                        'Accept-Encoding': 'gzip, deflate',
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'Accept-Encoding': 'gzip, deflate, br',
                         'Connection': 'keep-alive',
                         'Upgrade-Insecure-Requests': '1',
+                        'Sec-Fetch-Dest': 'document',
+                        'Sec-Fetch-Mode': 'navigate',
+                        'Sec-Fetch-Site': 'none',
+                        'Sec-Fetch-User': '?1',
+                        'Sec-CH-UA': '"Chromium";v="131", "Not_A Brand";v="24"',
+                        'Sec-CH-UA-Mobile': '?0',
+                        'Sec-CH-UA-Platform': '"Windows"',
                         ...options.headers
                     },
                     timeout: options.timeout || this.timeout,
