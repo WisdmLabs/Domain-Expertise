@@ -392,7 +392,7 @@ class WordPressAnalyzer {
             // ── Step 6: Performance via PageSpeed Insights (Google bypasses Cloudflare) ──
             if (this.options.includePerformance) {
                 try {
-                    console.log('⚡ Fetching PageSpeed Insights (Google crawlers bypass Cloudflare)...');
+                    console.log('⚡ Fetching PageSpeed Insights...');
                     const PageSpeed = require('./integrations/pagespeed');
                     const psiResult = await PageSpeed.fetchBoth(baseUrl);
 
@@ -468,6 +468,17 @@ class WordPressAnalyzer {
      */
     async analyzeFromWaybackMachine(baseUrl, startTime) {
         try {
+            // ── Fire PSI early so it runs in parallel with Wayback Machine fetch ──
+            let psiPromise = null;
+            if (this.options.includePerformance) {
+                console.log('⚡ Starting PageSpeed Insights in background (runs parallel with archive fetch)...');
+                const PageSpeed = require('./integrations/pagespeed');
+                psiPromise = PageSpeed.fetchBoth(baseUrl).catch(err => {
+                    console.error('❌ PageSpeed fetch failed:', err.message);
+                    return null;
+                });
+            }
+
             // ── Step 1: Find the latest snapshot URL via CDX API (fast, reliable) ──
             const domain = baseUrl.replace(/^https?:\/\//, '').replace(/\/$/, '');
             console.log('📚 Checking Wayback Machine CDX API for cached snapshot...');
@@ -718,12 +729,11 @@ class WordPressAnalyzer {
                 }
             }
 
-            // ── Step 6: Performance via PageSpeed Insights ──
-            if (this.options.includePerformance) {
+            // ── Step 6: Await PSI results (started in parallel at the top) ──
+            if (psiPromise) {
                 try {
-                    console.log('⚡ Fetching PageSpeed Insights (Google crawlers bypass Cloudflare)...');
-                    const PageSpeed = require('./integrations/pagespeed');
-                    const psiResult = await PageSpeed.fetchBoth(baseUrl);
+                    console.log('⏳ Waiting for PageSpeed Insights results...');
+                    const psiResult = await psiPromise;
 
                     if (psiResult && (psiResult.mobile || psiResult.desktop)) {
                         results.performance = {
