@@ -140,6 +140,13 @@ class PageSpeedInsights {
                     console.error(`🖥️ PSI Server Error (${resp.status}) - Google PSI service issue for ${url}`);
                 }
 
+                // Throw on retryable status codes so fetchWithRetry can retry them
+                if (resp.status === 429 || resp.status >= 500) {
+                    const err = new Error(`PSI API returned ${resp.status} for ${url} (${strategy})`);
+                    err.response = { status: resp.status, statusText: resp.statusText };
+                    throw err;
+                }
+
                 return null;
             }
 
