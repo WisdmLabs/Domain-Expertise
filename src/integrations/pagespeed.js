@@ -238,6 +238,11 @@ class PageSpeedInsights {
                 console.error(`🖥️ PSI server error for ${url} - Google's PSI service may be having issues`);
             }
 
+            // Re-throw retryable errors so fetchWithRetry can retry them
+            if (this.isRetryableError(err)) {
+                throw err;
+            }
+
             return null;
         }
     }
