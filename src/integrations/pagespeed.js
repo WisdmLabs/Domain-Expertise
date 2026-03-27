@@ -109,8 +109,9 @@ class PageSpeedInsights {
             if (apiKey) params.set('key', apiKey);
 
             // Adaptive timeout: increase timeout on retries for slow sites
-            const baseTimeout = 60000; // Increased to 60s based on debug results
-            const timeout = baseTimeout + retryAttempt * 20000; // Add 20s per retry
+            // Some sites (e.g. thetutorverse.com) take 75-80s for PSI to analyze
+            const baseTimeout = 90000; // 90s base — covers most slow sites on first attempt
+            const timeout = baseTimeout + retryAttempt * 20000; // 90s, 110s, 130s
             
             console.log(`⏱️ Using timeout: ${timeout}ms for ${strategy}`);
 
