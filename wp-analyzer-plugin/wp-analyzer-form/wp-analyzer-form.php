@@ -538,7 +538,7 @@ class WP_Analyzer_Form {
         $analysis_response = wp_remote_post($server_url . '/api/analyze', array(
             'headers' => array('Content-Type' => 'application/json'),
             'body' => json_encode(array('url' => $url)),
-            'timeout' => 120,
+            'timeout' => 300,
             'sslverify' => true
         ));
 
@@ -577,7 +577,7 @@ class WP_Analyzer_Form {
                 'format' => $format,
                 'analysisData' => $analysis_data['data']
             )),
-            'timeout' => 120,
+            'timeout' => 300,
             'sslverify' => true
         ));
 
