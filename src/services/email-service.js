@@ -170,9 +170,7 @@ class EmailService {
         const totalRecommendations = this.getActualRecommendationsCount(analysisData);
         
         // Generate engaging subject line
-        const subject = totalIssues > 0 
-            ? `🚨 ${totalIssues} Issues Found on ${domain} - WordPress Analysis Report`
-            : `✅ WordPress Analysis Complete for ${domain} - All Systems Good!`;
+        const subject = `Your website speed report is ready (Important)`;
 
         // Generate HTML content
         const html = `
