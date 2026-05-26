@@ -520,6 +520,9 @@ class EmailService {
                     </td>
                 </tr>
             </table>
+            <p style="font-size: 1rem; color: #374151; text-align: left; margin: 0 0 6px 0;">Hey,</p>
+            <p style="font-size: 1rem; color: #374151; text-align: left; margin: 0 0 6px 0;">We ran a speed analysis on your website.<br>There are a few issues affecting how fast it loads.</p>
+            <p style="font-size: 1rem; color: #374151; text-align: left; margin: 0 0 24px 0;">The report is ready, along with a clear list of what needs to be fixed.</p>
             <h1>WordPress Analysis Report</h1>
             <p class="subtitle">Comprehensive Plugins & Performance Analysis</p>
         </header>
