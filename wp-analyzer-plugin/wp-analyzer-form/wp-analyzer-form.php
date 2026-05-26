@@ -813,17 +813,7 @@ class WP_Analyzer_Form {
      * Generate email subject based on analysis summary
      */
     private function generate_email_subject($domain, $summary) {
-        $issues = 0;
-
-        if (isset($summary['outdated_plugins']) && $summary['outdated_plugins'] > 0) {
-            $issues += $summary['outdated_plugins'];
-        }
-
-        if ($issues > 0) {
-            return sprintf('🚨 %d Issues Found on %s - WordPress Analysis Report', $issues, $domain);
-        }
-
-        return sprintf('✅ WordPress Analysis Complete for %s - All Systems Good!', $domain);
+        return 'Your website speed report is ready (Important)';
     }
 
     /**
@@ -867,6 +857,12 @@ class WP_Analyzer_Form {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
 </head>
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+    <div style="margin-bottom: 24px;">
+        <p style="font-size: 1rem; color: #374151; margin: 0 0 6px 0;">Hey,</p>
+        <p style="font-size: 1rem; color: #374151; margin: 0 0 6px 0;">We ran a speed analysis on your website.<br>There are a few issues affecting how fast it loads.</p>
+        <p style="font-size: 1rem; color: #374151; margin: 0 0 0 0;">The report is ready, along with a clear list of what needs to be fixed.</p>
+    </div>
+
     <div style="text-align: center; margin-bottom: 30px;">
         <h1 style="color: #1a1a1a; margin-bottom: 10px;">WordPress Analysis Report</h1>
         <p style="color: #666;">Comprehensive analysis for <?php echo esc_html($domain); ?></p>
@@ -902,11 +898,11 @@ class WP_Analyzer_Form {
     </div>
 
     <div style="background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 20px; text-align: center;">
-        <h3 style="margin-top: 0;">Need Expert Help?</h3>
-        <p style="color: #666;">Our WordPress experts are ready to help you resolve issues and optimize your site.</p>
-        <a href="https://wisdmlabs.com/fix-wordpress-issues/?utm_source=email&utm_medium=wordpress_analyzer&utm_campaign=cta_button"
+        <p style="color: #666; margin: 0 0 16px 0;">The sooner these are fixed, the less friction visitors face on your site.</p>
+        <p style="color: #666; margin: 0 0 24px 0;">If you can't prioritize it right away, we can help get it done.</p>
+        <a href="https://calendly.com/abu-bakkar-wisdmlabs/book-a-call"
            style="display: inline-block; background: #960000; color: #fff; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: 600;">
-            Schedule a Free Consultation
+            Book a Call
         </a>
     </div>
 
