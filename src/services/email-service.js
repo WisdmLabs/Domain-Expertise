@@ -562,10 +562,10 @@ class EmailService {
             </section>
             
             <section class="contact-section">
-                <h2>Need Expert Help?</h2>
-                <p>Our WordPress experts are ready to help you resolve these issues, optimize your site's performance, and keep it secure.</p>
-                <a href="https://wisdmlabs.com/fix-wordpress-issues/?utm_source=email&utm_medium=wordpress_analyzer&utm_campaign=cta_button" class="cta-button">
-                    Schedule a Free Consultation
+                <p>The sooner these are fixed, the less friction visitors face on your site.</p>
+                <p>If you can't prioritize it right away, we can help get it done.</p>
+                <a href="https://calendly.com/abu-bakkar-wisdmlabs/book-a-call" class="cta-button">
+                    Book a Call
                 </a>
             </section>
         </main>
