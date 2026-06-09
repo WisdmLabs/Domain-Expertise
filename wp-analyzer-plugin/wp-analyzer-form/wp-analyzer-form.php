@@ -111,7 +111,8 @@ class WP_Analyzer_Form {
         $default_options = array(
             'server_url' => 'https://mydomain-project.vercel.app',
             'default_format' => 'print',
-            'cf7_form_id' => ''
+            'cf7_form_id' => '',
+            'bcc_email' => 'contact@wisdmlabs.com'
         );
         
         add_option('wp_analyzer_form_options', $default_options);
@@ -217,6 +218,14 @@ class WP_Analyzer_Form {
             'wp-analyzer-form',
             'wp_analyzer_form_main'
         );
+
+        add_settings_field(
+            'bcc_email',
+            __('BCC Email Address', 'wp-analyzer-form'),
+            array($this, 'bcc_email_callback'),
+            'wp-analyzer-form',
+            'wp_analyzer_form_main'
+        );
     }
     
     /**
@@ -253,7 +262,15 @@ class WP_Analyzer_Form {
         } else {
             $output['cf7_form_id'] = '';
         }
-        
+
+        // Validate BCC email
+        if (isset($input['bcc_email'])) {
+            $bcc = sanitize_email($input['bcc_email']);
+            $output['bcc_email'] = $bcc;
+        } else {
+            $output['bcc_email'] = '';
+        }
+
         return $output;
     }
     
@@ -313,6 +330,16 @@ class WP_Analyzer_Form {
         }
     }
     
+    /**
+     * BCC Email callback
+     */
+    public function bcc_email_callback() {
+        $options = get_option('wp_analyzer_form_options');
+        $bcc_email = isset($options['bcc_email']) ? $options['bcc_email'] : 'contact@wisdmlabs.com';
+        echo '<input type="email" id="bcc_email" name="wp_analyzer_form_options[bcc_email]" value="' . esc_attr($bcc_email) . '" class="regular-text" />';
+        echo '<p class="description">' . __('BCC a copy of every report email to this address. Leave empty to disable.', 'wp-analyzer-form') . '</p>';
+    }
+
     /**
      * Admin page
      */
@@ -793,10 +820,16 @@ class WP_Analyzer_Form {
         // Prepare email
         $subject = $this->generate_email_subject($domain, $summary);
         $message = $this->generate_email_body($site_url, $summary);
+        $options = get_option('wp_analyzer_form_options');
+        $bcc_email = isset($options['bcc_email']) ? sanitize_email($options['bcc_email']) : '';
+
         $headers = array(
             'Content-Type: text/html; charset=UTF-8',
             'From: WordPress Analyzer <' . get_option('admin_email') . '>'
         );
+        if (!empty($bcc_email) && is_email($bcc_email)) {
+            $headers[] = 'Bcc: ' . $bcc_email;
+        }
         $attachments = array($temp_file);
 
         // Send email
