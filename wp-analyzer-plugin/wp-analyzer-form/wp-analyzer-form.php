@@ -593,6 +593,14 @@ class WP_Analyzer_Form {
             return false;
         }
 
+        // Check if site is WordPress - if not, send a friendly acknowledgment email
+        $is_wordpress = isset($analysis_data['data']['wordpress']['isWordPress']) && $analysis_data['data']['wordpress']['isWordPress'];
+        if (!$is_wordpress) {
+            error_log('WP Analyzer Form - Site is not WordPress: ' . $url);
+            $this->send_non_wordpress_email($email, $url);
+            return true;
+        }
+
         $summary = $this->extract_summary_from_analysis($analysis_data);
 
         error_log('WP Analyzer Form - Analysis complete, fetching PDF...');
@@ -948,6 +956,59 @@ class WP_Analyzer_Form {
 </html>
         <?php
         return ob_get_clean();
+    }
+
+    /**
+     * Send friendly acknowledgment email for non-WordPress sites
+     */
+    private function send_non_wordpress_email($to_email, $site_url) {
+        $domain = parse_url($site_url, PHP_URL_HOST);
+
+        $subject = 'We received your website audit request';
+
+        $message = '<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+    <div style="margin-bottom: 24px;">
+        <p style="font-size: 1rem; color: #374151;">Hey,</p>
+        <p style="font-size: 1rem; color: #374151;">Thanks for your request. We\'ve received your details for <strong>' . esc_html($domain) . '</strong> and our team will get back to you shortly.</p>
+        <p style="font-size: 1rem; color: #374151;">In the meantime, if you\'d like to discuss your website\'s performance, feel free to book a call with us.</p>
+    </div>
+
+    <div style="text-align: center; margin: 30px 0;">
+        <a href="https://calendly.com/abu-bakkar-wisdmlabs/book-a-call"
+           style="display: inline-block; background: #960000; color: #fff; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: 600;">
+            Book a Call
+        </a>
+    </div>
+
+    <div style="text-align: center; margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; color: #666; font-size: 14px;">
+        <p>&copy; ' . date('Y') . ' WisdmLabs. All rights reserved.</p>
+    </div>
+</body>
+</html>';
+
+        $options = get_option('wp_analyzer_form_options');
+        $bcc_email = isset($options['bcc_email']) ? sanitize_email($options['bcc_email']) : '';
+
+        $headers = array(
+            'Content-Type: text/html; charset=UTF-8',
+            'From: WordPress Analyzer <' . get_option('admin_email') . '>'
+        );
+        if (!empty($bcc_email) && is_email($bcc_email)) {
+            $headers[] = 'Bcc: ' . $bcc_email;
+        }
+
+        $sent = wp_mail($to_email, $subject, $message, $headers);
+
+        if ($sent) {
+            error_log('WP Analyzer Form - Non-WordPress acknowledgment email sent to: ' . $to_email);
+        } else {
+            error_log('WP Analyzer Form - Failed to send non-WordPress email to: ' . $to_email);
+        }
+
+        return $sent;
     }
 
     /**
