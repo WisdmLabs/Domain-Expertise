@@ -3,7 +3,7 @@
  * Plugin Name: WP Analyzer Form
  * Plugin URI: https://github.com/yourusername/wp-analyzer-form
  * Description: A WordPress plugin that integrates with Contact Form 7 to submit site analysis requests to an external WordPress analyzer server.
- * Version: 1.2.0
+ * Version: 1.3.0
  * Author: WisdmLabs
  * Author URI: https://wisdmlabs.com
  * License: GPL v2 or later
@@ -19,7 +19,7 @@ if (!defined('ABSPATH')) {
 }
 
 // Define plugin constants
-define('WP_ANALYZER_FORM_VERSION', '1.2.0');
+define('WP_ANALYZER_FORM_VERSION', '1.3.0');
 define('WP_ANALYZER_FORM_PLUGIN_URL', plugin_dir_url(__FILE__));
 define('WP_ANALYZER_FORM_PLUGIN_PATH', plugin_dir_path(__FILE__));
 define('WP_ANALYZER_FORM_PLUGIN_BASENAME', plugin_basename(__FILE__));
